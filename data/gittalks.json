@@ -1,0 +1,21 @@
+{
+  "jobs": {
+    "0f2e28af-32f6-4254-a7a6-e77d1becb365": {
+      "id": "0f2e28af-32f6-4254-a7a6-e77d1becb365",
+      "repo_url": "https://github.com/tailwindlabs/tailwindcss",
+      "owner": "tailwindlabs",
+      "name": "tailwindcss",
+      "user_id": "anonymous",
+      "status": "failed",
+      "current_step": "Pipeline failed",
+      "playlist_id": null,
+      "error_message": "GOOGLE_GENERATIVE_AI_API_KEY is required",
+      "conversation_style": "duo",
+      "created_at": "2026-02-03T18:11:21.508Z",
+      "updated_at": "2026-02-03T18:11:33.223Z",
+      "completed_at": "2026-02-03T18:11:33.223Z"
+    }
+  },
+  "playlists": {},
+  "episodes": {}
+}
