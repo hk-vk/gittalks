@@ -33,7 +33,7 @@ async function ensureAudioDir() {
 export async function uploadAudio(
   audioBuffer: Buffer,
   filename: string,
-  format: "mp3" | "wav" = "wav"
+  format: "mp3" | "wav" = "mp3"
 ): Promise<string> {
   const mimeType = format === "wav" ? "audio/wav" : "audio/mpeg";
   const extension = format;

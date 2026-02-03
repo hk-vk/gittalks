@@ -1,5 +1,6 @@
 // GitTalks - TTS Integration
-// Uses DeepInfra Kokoro TTS (fast, high-quality) or Edge TTS (free fallback)
+// Uses DeepInfra Kokoro TTS via OpenAI-compatible API (fast, high-quality)
+// Or Edge TTS (free fallback)
 
 import type {
   TTSSynthesizeResult,
@@ -12,8 +13,8 @@ import { uploadAudio } from "./storage";
 // Check which TTS engine to use
 const USE_KOKORO = !!process.env.DEEPINFRA_API_KEY;
 
-// DeepInfra API endpoint for Kokoro
-const DEEPINFRA_API_URL = "https://api.deepinfra.com/v1/inference/hexgrad/Kokoro-82M";
+// DeepInfra OpenAI-compatible TTS endpoint
+const DEEPINFRA_OPENAI_URL = "https://api.deepinfra.com/v1/openai/audio/speech";
 
 // Kokoro Voice configurations
 const KOKORO_VOICES = {
@@ -73,7 +74,7 @@ function estimateDuration(text: string): number {
   return (wordCount / 150) * 60; // ~150 words per minute
 }
 
-// Synthesize using Kokoro via DeepInfra
+// Synthesize using Kokoro via DeepInfra OpenAI-compatible API
 async function synthesizeWithKokoro(
   text: string,
   voice: string
@@ -84,20 +85,19 @@ async function synthesizeWithKokoro(
 
   console.log(`[TTS/Kokoro] Synthesizing ${cleanText.length} chars with voice ${voice}`);
 
-  // Kokoro API expects preset_voice as array
-  const response = await fetch(DEEPINFRA_API_URL, {
+  // Use OpenAI-compatible API endpoint which properly returns MP3
+  const response = await fetch(DEEPINFRA_OPENAI_URL, {
     method: "POST",
     headers: {
-      "Authorization": `bearer ${apiKey}`,
+      "Authorization": `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      text: cleanText,
-      preset_voice: [voice],  // Voice as array per docs
-      output_format: "mp3",   // Request MP3 format (universal browser support)
-      speed: speed,           // Speaking speed
-      return_timestamps: true, // Get word timestamps for synced lyrics
-      stream: false,          // Don't stream, get full audio
+      model: "hexgrad/Kokoro-82M",
+      input: cleanText,
+      voice: voice,
+      response_format: "mp3",
+      speed: speed,
     }),
   });
 
@@ -106,83 +106,37 @@ async function synthesizeWithKokoro(
     throw new Error(`Kokoro TTS error: ${response.status} - ${error}`);
   }
 
-  const result = await response.json();
-  
-  // Debug: log the response structure
-  console.log(`[TTS/Kokoro] Response keys: ${Object.keys(result).join(", ")}`);
-  if (result.audio) {
-    console.log(`[TTS/Kokoro] Audio type: ${typeof result.audio}, length: ${typeof result.audio === "string" ? result.audio.length : "N/A"}`);
-  }
+  // OpenAI API returns raw audio bytes directly (not JSON)
+  const arrayBuffer = await response.arrayBuffer();
+  const audioBuffer = Buffer.from(arrayBuffer);
 
-  // Get audio data - Kokoro returns base64-encoded MP3 when output_format=mp3
-  let audioBuffer: Buffer;
-  
-  if (result.audio) {
-    if (typeof result.audio === "string") {
-      // Base64 encoded audio - this is the typical format
-      audioBuffer = Buffer.from(result.audio, "base64");
-      console.log(`[TTS/Kokoro] Decoded audio size: ${audioBuffer.length} bytes`);
-      
-      // Verify audio format by checking magic bytes
-      if (audioBuffer.length > 4) {
-        const firstBytes = audioBuffer.slice(0, 4);
-        console.log(`[TTS/Kokoro] First 4 bytes (hex): ${firstBytes.toString("hex")}`);
-        
-        // ID3 tag starts with 'ID3'
-        if (firstBytes[0] === 0x49 && firstBytes[1] === 0x44 && firstBytes[2] === 0x33) {
-          console.log(`[TTS/Kokoro] Detected ID3 tag (valid MP3 with metadata)`);
-        }
-        // MP3 sync word starts with 0xFF 0xFB/0xFA/0xF3/0xF2
-        else if (firstBytes[0] === 0xFF && (firstBytes[1] & 0xE0) === 0xE0) {
-          console.log(`[TTS/Kokoro] Detected MP3 frame sync (valid MP3)`);
-        }
-        // WAV starts with 'RIFF'
-        else if (firstBytes.toString("ascii") === "RIFF") {
-          console.log(`[TTS/Kokoro] WARNING: Detected WAV format, but expected MP3!`);
-        }
-        else {
-          console.log(`[TTS/Kokoro] WARNING: Unknown audio format!`);
-        }
-      }
-    } else if (Buffer.isBuffer(result.audio)) {
-      audioBuffer = result.audio;
+  console.log(`[TTS/Kokoro] Received ${audioBuffer.length} bytes MP3 audio`);
+
+  // Verify it's MP3 by checking magic bytes
+  if (audioBuffer.length > 4) {
+    const firstBytes = audioBuffer.slice(0, 4);
+    if (firstBytes[0] === 0x49 && firstBytes[1] === 0x44 && firstBytes[2] === 0x33) {
+      console.log(`[TTS/Kokoro] Verified: MP3 with ID3 tag`);
+    } else if (firstBytes[0] === 0xFF && (firstBytes[1] & 0xE0) === 0xE0) {
+      console.log(`[TTS/Kokoro] Verified: Raw MP3 frames`);
     } else {
-      throw new Error(`Unexpected audio type: ${typeof result.audio}`);
+      console.log(`[TTS/Kokoro] Warning: Unexpected format, first bytes: ${firstBytes.toString("hex")}`);
     }
-  } else {
-    console.error("[TTS/Kokoro] Full response:", JSON.stringify(result).slice(0, 500));
-    throw new Error("No audio data in Kokoro response");
   }
 
-  // Extract word timestamps if available
-  // Format: [{id, start, end, text}, ...]
-  const wordTimestamps: WordTimestamp[] = result.words
-    ? result.words.map((word: { id?: number; start: number; end: number; text: string }) => ({
-        offset: Math.round(word.start * 10_000_000), // Convert to ticks for consistency
-        duration: Math.round((word.end - word.start) * 10_000_000),
-        text: word.text,
-      }))
-    : [];
+  // Calculate duration from audio size (approximate for MP3)
+  // MP3 at 128kbps = 16KB per second
+  // Kokoro typically uses ~48-64kbps for speech
+  const estimatedBitrate = 48000; // 48kbps typical for speech
+  const durationSecs = (audioBuffer.length * 8) / estimatedBitrate;
 
-  // Get duration from word timestamps or calculate from audio
-  let durationSecs: number;
-  if (result.words && result.words.length > 0) {
-    const lastWord = result.words[result.words.length - 1];
-    durationSecs = lastWord.end;
-  } else if (result.inference_status?.runtime_ms) {
-    // Estimate from inference time (approximate)
-    durationSecs = estimateDuration(cleanText);
-  } else {
-    durationSecs = estimateDuration(cleanText);
-  }
-
-  console.log(`[TTS/Kokoro] Generated ${durationSecs.toFixed(1)}s MP3 audio with ${wordTimestamps.length} timestamps`);
+  console.log(`[TTS/Kokoro] Generated ~${durationSecs.toFixed(1)}s MP3 audio`);
 
   return {
     audioData: audioBuffer,
     durationSecs,
-    format: "mp3", // We requested MP3
-    wordTimestamps,
+    format: "mp3",
+    wordTimestamps: [], // OpenAI API doesn't return timestamps
   };
 }
 
@@ -267,12 +221,11 @@ export async function synthesizeDialogue(
     // Synthesize this turn with the speaker's voice
     const result = await synthesizeText(turn.text, voice);
     
-    // Strip MP3 header for all chunks except first
-    // MP3 chunks can be concatenated if we handle headers properly
+    // For MP3 concatenation, we need to handle headers properly
+    // First chunk keeps full data, subsequent chunks skip ID3 tag
     if (i === 0) {
       audioChunks.push(result.audioData);
     } else {
-      // For subsequent chunks, we need to skip the ID3 tag if present
       const chunk = skipMP3Header(result.audioData);
       audioChunks.push(chunk);
     }
@@ -299,8 +252,7 @@ export async function synthesizeDialogue(
     }
   }
 
-  // Combine MP3 chunks - this works because Kokoro outputs CBR (constant bitrate) MP3
-  // For VBR MP3s, you'd need a Xing header, but Kokoro uses CBR by default
+  // Combine MP3 chunks
   const combinedAudio = Buffer.concat(audioChunks);
   const totalDurationSecs = currentOffsetTicks / 10_000_000;
 
@@ -356,7 +308,7 @@ export async function synthesizeEpisode(
 export async function saveAudioToStorage(
   audioData: Buffer,
   filename: string,
-  format: "mp3" | "wav" = "wav"
+  format: "mp3" | "wav" = "mp3"
 ): Promise<string> {
   return uploadAudio(audioData, filename, format);
 }
