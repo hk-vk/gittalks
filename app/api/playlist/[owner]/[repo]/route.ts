@@ -18,7 +18,7 @@ export async function GET(
       );
     }
 
-    const result = getPlaylistByRepo(owner, repo);
+    const result = await getPlaylistByRepo(owner, repo);
 
     if (!result) {
       return NextResponse.json(

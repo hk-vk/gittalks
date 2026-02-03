@@ -25,16 +25,25 @@ async function ensureAudioDir() {
 
 /**
  * Upload audio file to storage
+ * @param audioBuffer - The audio data buffer
+ * @param filename - Filename without extension
+ * @param format - Audio format ('mp3' or 'wav')
  * @returns URL to access the audio file
  */
 export async function uploadAudio(
   audioBuffer: Buffer,
-  filename: string
+  filename: string,
+  format: "mp3" | "wav" = "wav"
 ): Promise<string> {
+  const mimeType = format === "wav" ? "audio/wav" : "audio/mpeg";
+  const extension = format;
+  
   if (USE_UPLOADTHING && utapi) {
     // Upload to UploadThing
-    const file = new File([audioBuffer], `${filename}.mp3`, {
-      type: "audio/mpeg",
+    // Convert Buffer to Uint8Array for File constructor compatibility
+    const uint8Array = new Uint8Array(audioBuffer);
+    const file = new File([uint8Array], `${filename}.${extension}`, {
+      type: mimeType,
     });
     
     const response = await utapi.uploadFiles([file]);
@@ -47,9 +56,9 @@ export async function uploadAudio(
   } else {
     // Save to local filesystem
     await ensureAudioDir();
-    const filePath = path.join(LOCAL_AUDIO_DIR, `${filename}.mp3`);
+    const filePath = path.join(LOCAL_AUDIO_DIR, `${filename}.${extension}`);
     await fs.writeFile(filePath, audioBuffer);
-    return `/audio/${filename}.mp3`;
+    return `/audio/${filename}.${extension}`;
   }
 }
 

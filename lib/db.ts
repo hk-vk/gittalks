@@ -1,322 +1,327 @@
-// GitTalks - Database Layer (JSON File Storage)
-// Simple file-based storage that works everywhere without native dependencies
+// GitTalks - Database Layer (Drizzle ORM + Turso/LibSQL)
+// Proper SQL database with sync capabilities
 
-import { promises as fs } from "fs";
-import path from "path";
+import { eq, desc, and } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
-import type {
-  Job,
-  Playlist,
-  Episode,
-  JobStatus,
-  ConversationStyle,
-} from "./types";
+import { getDb, initializeDatabase } from "./database";
+import { jobs, playlists, episodes, repoCache } from "./schema";
+import type { 
+  Job, NewJob, 
+  Playlist, NewPlaylist, 
+  Episode, NewEpisode,
+  RepoCache, NewRepoCache 
+} from "./schema";
 
-// Database file path
-const DB_DIR = path.join(process.cwd(), "data");
-const DB_FILE = path.join(DB_DIR, "gittalks.json");
+// Re-export types from schema
+export type { Job, Playlist, Episode, RepoCache };
 
-// Database structure
-interface Database {
-  jobs: Record<string, Job>;
-  playlists: Record<string, Playlist>;
-  episodes: Record<string, Episode>;
-}
+// Job status type
+export type JobStatus = 
+  | "queued" 
+  | "fetching" 
+  | "analyzing" 
+  | "generating-content" 
+  | "generating-audio" 
+  | "completed" 
+  | "failed";
 
-// Default empty database
-const DEFAULT_DB: Database = {
-  jobs: {},
-  playlists: {},
-  episodes: {},
-};
-
-// In-memory cache
-let dbCache: Database | null = null;
-
-// Ensure data directory exists
-async function ensureDataDir() {
-  try {
-    await fs.mkdir(DB_DIR, { recursive: true });
-  } catch (e) {
-    // Ignore if exists
-  }
-}
-
-// Load database from file
-async function loadDb(): Promise<Database> {
-  if (dbCache) return dbCache;
-
-  try {
-    await ensureDataDir();
-    const data = await fs.readFile(DB_FILE, "utf-8");
-    dbCache = JSON.parse(data) as Database;
-    return dbCache;
-  } catch (e) {
-    // File doesn't exist, return default
-    dbCache = { ...DEFAULT_DB };
-    return dbCache;
-  }
-}
-
-// Save database to file
-async function saveDb(db: Database): Promise<void> {
-  await ensureDataDir();
-  await fs.writeFile(DB_FILE, JSON.stringify(db, null, 2), "utf-8");
-  dbCache = db;
-}
-
-// Synchronous versions for simpler API (loads from cache after first load)
-function getDbSync(): Database {
-  if (!dbCache) {
-    // Return default if not loaded yet
-    return { ...DEFAULT_DB };
-  }
-  return dbCache;
-}
+// Conversation style type
+export type ConversationStyle = "single" | "duo";
 
 // Initialize database (call at startup)
 export async function initializeDb(): Promise<void> {
-  await loadDb();
+  await initializeDatabase();
 }
 
 // ============================================
 // Job Operations
 // ============================================
 
-export function createJob(
+export async function createJob(
   repoUrl: string,
   owner: string,
   name: string,
   userId: string,
   conversationStyle: ConversationStyle = "single"
-): Job {
-  const db = getDbSync();
+): Promise<Job> {
+  const db = getDb();
   const id = uuidv4();
   const now = new Date().toISOString();
 
-  const job: Job = {
+  const newJob: NewJob = {
     id,
-    repo_url: repoUrl,
+    repoUrl,
     owner,
     name,
-    user_id: userId,
+    userId,
     status: "queued",
-    current_step: null,
-    playlist_id: null,
-    error_message: null,
-    conversation_style: conversationStyle,
-    created_at: now,
-    updated_at: now,
-    completed_at: null,
+    currentStep: null,
+    playlistId: null,
+    errorMessage: null,
+    conversationStyle,
+    createdAt: now,
+    updatedAt: now,
+    completedAt: null,
   };
 
-  db.jobs[id] = job;
-  saveDb(db).catch(console.error);
-
-  return job;
+  await db.insert(jobs).values(newJob);
+  return newJob as Job;
 }
 
-export function getJobById(id: string): Job | null {
-  const db = getDbSync();
-  return db.jobs[id] || null;
+export async function getJobById(id: string): Promise<Job | null> {
+  const db = getDb();
+  const result = await db.select().from(jobs).where(eq(jobs.id, id));
+  return result[0] || null;
 }
 
-export function updateJobStatus(
+export async function updateJobStatus(
   id: string,
   status: JobStatus,
   currentStep?: string,
   errorMessage?: string
-): void {
-  const db = getDbSync();
-  const job = db.jobs[id];
-  if (!job) return;
-
+): Promise<void> {
+  const db = getDb();
   const now = new Date().toISOString();
-  job.status = status;
-  job.updated_at = now;
+
+  const updates: Partial<NewJob> = {
+    status,
+    updatedAt: now,
+  };
 
   if (currentStep !== undefined) {
-    job.current_step = currentStep;
+    updates.currentStep = currentStep;
   }
 
   if (errorMessage !== undefined) {
-    job.error_message = errorMessage;
+    updates.errorMessage = errorMessage;
   }
 
   if (status === "completed" || status === "failed") {
-    job.completed_at = now;
+    updates.completedAt = now;
   }
 
-  saveDb(db).catch(console.error);
+  await db.update(jobs).set(updates).where(eq(jobs.id, id));
 }
 
-export function setJobPlaylist(jobId: string, playlistId: string): void {
-  const db = getDbSync();
-  const job = db.jobs[jobId];
-  if (!job) return;
-
-  job.playlist_id = playlistId;
-  job.updated_at = new Date().toISOString();
-  saveDb(db).catch(console.error);
+export async function setJobPlaylist(jobId: string, playlistId: string): Promise<void> {
+  const db = getDb();
+  await db.update(jobs).set({
+    playlistId,
+    updatedAt: new Date().toISOString(),
+  }).where(eq(jobs.id, jobId));
 }
 
-export function getJobsByStatus(status: JobStatus): Job[] {
-  const db = getDbSync();
-  return Object.values(db.jobs).filter((j) => j.status === status);
+export async function getJobsByStatus(status: JobStatus): Promise<Job[]> {
+  const db = getDb();
+  return db.select().from(jobs).where(eq(jobs.status, status));
 }
 
-export function getRecentJobs(limit: number = 20): Job[] {
-  const db = getDbSync();
-  return Object.values(db.jobs)
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-    .slice(0, limit);
+export async function getRecentJobs(limit: number = 20): Promise<Job[]> {
+  const db = getDb();
+  return db.select().from(jobs)
+    .orderBy(desc(jobs.createdAt))
+    .limit(limit);
 }
 
 // ============================================
 // Playlist Operations
 // ============================================
 
-export function createPlaylist(
+export async function createPlaylist(
   title: string,
   description: string | null,
   owner: string,
   repoName: string,
   repoUrl: string,
   userId: string
-): Playlist {
-  const db = getDbSync();
+): Promise<Playlist> {
+  const db = getDb();
   const id = uuidv4();
   const now = new Date().toISOString();
 
-  const playlist: Playlist = {
+  const newPlaylist: NewPlaylist = {
     id,
     title,
     description,
     owner,
-    repo_name: repoName,
-    repo_url: repoUrl,
-    user_id: userId,
-    total_duration_secs: 0,
-    is_public: 1,
-    created_at: now,
-    updated_at: now,
+    repoName,
+    repoUrl,
+    userId,
+    totalDurationSecs: 0,
+    isPublic: true,
+    createdAt: now,
+    updatedAt: now,
   };
 
-  db.playlists[id] = playlist;
-  saveDb(db).catch(console.error);
-
-  return playlist;
+  await db.insert(playlists).values(newPlaylist);
+  return newPlaylist as Playlist;
 }
 
-export function getPlaylistById(id: string): Playlist | null {
-  const db = getDbSync();
-  return db.playlists[id] || null;
+export async function getPlaylistById(id: string): Promise<Playlist | null> {
+  const db = getDb();
+  const result = await db.select().from(playlists).where(eq(playlists.id, id));
+  return result[0] || null;
 }
 
-export function getPlaylistByRepo(owner: string, repoName: string): Playlist | null {
-  const db = getDbSync();
-  const playlists = Object.values(db.playlists)
-    .filter((p) => p.owner === owner && p.repo_name === repoName)
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-  return playlists[0] || null;
+export async function getPlaylistByRepo(owner: string, repoName: string): Promise<Playlist | null> {
+  const db = getDb();
+  const result = await db.select().from(playlists)
+    .where(and(eq(playlists.owner, owner), eq(playlists.repoName, repoName)))
+    .orderBy(desc(playlists.createdAt))
+    .limit(1);
+  return result[0] || null;
 }
 
-export function updatePlaylistDuration(id: string, totalDurationSecs: number): void {
-  const db = getDbSync();
-  const playlist = db.playlists[id];
-  if (!playlist) return;
-
-  playlist.total_duration_secs = totalDurationSecs;
-  playlist.updated_at = new Date().toISOString();
-  saveDb(db).catch(console.error);
+export async function updatePlaylistDuration(id: string, totalDurationSecs: number): Promise<void> {
+  const db = getDb();
+  await db.update(playlists).set({
+    totalDurationSecs,
+    updatedAt: new Date().toISOString(),
+  }).where(eq(playlists.id, id));
 }
 
-export function getRecentPlaylists(limit: number = 20): Playlist[] {
-  const db = getDbSync();
-  return Object.values(db.playlists)
-    .filter((p) => p.is_public === 1)
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-    .slice(0, limit);
+export async function getRecentPlaylists(limit: number = 20): Promise<Playlist[]> {
+  const db = getDb();
+  return db.select().from(playlists)
+    .where(eq(playlists.isPublic, true))
+    .orderBy(desc(playlists.createdAt))
+    .limit(limit);
 }
 
 // ============================================
 // Episode Operations
 // ============================================
 
-export function createEpisode(
+export async function createEpisode(
   playlistId: string,
   title: string,
   description: string | null,
   episodeNumber: number,
   conversationStyle: ConversationStyle,
   isFree: boolean = false
-): Episode {
-  const db = getDbSync();
+): Promise<Episode> {
+  const db = getDb();
   const id = uuidv4();
   const now = new Date().toISOString();
 
-  const episode: Episode = {
+  const newEpisode: NewEpisode = {
     id,
-    playlist_id: playlistId,
+    playlistId,
     title,
     description,
-    episode_number: episodeNumber,
-    audio_url: null,
-    duration_secs: 0,
+    episodeNumber,
+    audioUrl: null,
+    durationSecs: 0,
     transcript: null,
-    show_notes: null,
-    word_timestamps: null,
-    is_free: isFree ? 1 : 0,
-    conversation_style: conversationStyle,
-    created_at: now,
+    showNotes: null,
+    wordTimestamps: null,
+    isFree,
+    conversationStyle,
+    createdAt: now,
   };
 
-  db.episodes[id] = episode;
-  saveDb(db).catch(console.error);
-
-  return episode;
+  await db.insert(episodes).values(newEpisode);
+  return newEpisode as Episode;
 }
 
-export function getEpisodeById(id: string): Episode | null {
-  const db = getDbSync();
-  return db.episodes[id] || null;
+export async function getEpisodeById(id: string): Promise<Episode | null> {
+  const db = getDb();
+  const result = await db.select().from(episodes).where(eq(episodes.id, id));
+  return result[0] || null;
 }
 
-export function getEpisodesByPlaylist(playlistId: string): Episode[] {
-  const db = getDbSync();
-  return Object.values(db.episodes)
-    .filter((e) => e.playlist_id === playlistId)
-    .sort((a, b) => a.episode_number - b.episode_number);
+export async function getEpisodesByPlaylist(playlistId: string): Promise<Episode[]> {
+  const db = getDb();
+  return db.select().from(episodes)
+    .where(eq(episodes.playlistId, playlistId))
+    .orderBy(episodes.episodeNumber);
 }
 
-export function updateEpisodeAudio(
+export async function updateEpisodeAudio(
   id: string,
   audioUrl: string,
   durationSecs: number,
   wordTimestamps?: string
-): void {
-  const db = getDbSync();
-  const episode = db.episodes[id];
-  if (!episode) return;
-
-  episode.audio_url = audioUrl;
-  episode.duration_secs = durationSecs;
-  episode.word_timestamps = wordTimestamps || null;
-  saveDb(db).catch(console.error);
+): Promise<void> {
+  const db = getDb();
+  await db.update(episodes).set({
+    audioUrl,
+    durationSecs,
+    wordTimestamps: wordTimestamps || null,
+  }).where(eq(episodes.id, id));
 }
 
-export function updateEpisodeContent(
+export async function updateEpisodeContent(
   id: string,
   transcript: string,
   showNotes: string
-): void {
-  const db = getDbSync();
-  const episode = db.episodes[id];
-  if (!episode) return;
+): Promise<void> {
+  const db = getDb();
+  await db.update(episodes).set({
+    transcript,
+    showNotes,
+  }).where(eq(episodes.id, id));
+}
 
-  episode.transcript = transcript;
-  episode.show_notes = showNotes;
-  saveDb(db).catch(console.error);
+// ============================================
+// Repository Cache Operations
+// ============================================
+
+export async function getCachedRepo(owner: string, repoName: string): Promise<RepoCache | null> {
+  const db = getDb();
+  const now = new Date().toISOString();
+  
+  const result = await db.select().from(repoCache)
+    .where(and(
+      eq(repoCache.owner, owner), 
+      eq(repoCache.repoName, repoName)
+    ))
+    .limit(1);
+  
+  const cached = result[0];
+  if (!cached) return null;
+  
+  // Check if expired
+  if (cached.expiresAt < now) {
+    await db.delete(repoCache).where(eq(repoCache.id, cached.id));
+    return null;
+  }
+  
+  return cached;
+}
+
+export async function setCachedRepo(
+  owner: string,
+  repoName: string,
+  metadata: unknown,
+  fileTree: unknown,
+  analysis: unknown,
+  ttlHours: number = 24
+): Promise<RepoCache> {
+  const db = getDb();
+  const id = uuidv4();
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + ttlHours * 60 * 60 * 1000);
+
+  const newCache: NewRepoCache = {
+    id,
+    owner,
+    repoName,
+    metadata: JSON.stringify(metadata),
+    fileTree: JSON.stringify(fileTree),
+    analysis: JSON.stringify(analysis),
+    cachedAt: now.toISOString(),
+    expiresAt: expiresAt.toISOString(),
+  };
+
+  // Delete existing cache for this repo
+  await db.delete(repoCache).where(and(
+    eq(repoCache.owner, owner),
+    eq(repoCache.repoName, repoName)
+  ));
+
+  await db.insert(repoCache).values(newCache);
+  return newCache as RepoCache;
 }
 
 // ============================================
@@ -324,5 +329,5 @@ export function updateEpisodeContent(
 // ============================================
 
 export function closeDb(): void {
-  dbCache = null;
+  // Handled by database.ts
 }

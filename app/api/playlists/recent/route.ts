@@ -9,7 +9,7 @@ export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const limit = parseInt(searchParams.get("limit") || "10", 10);
 
-    const playlists = getRecentPlaylists(Math.min(limit, 50));
+    const playlists = await getRecentPlaylists(Math.min(limit, 50));
 
     return NextResponse.json({
       playlists,

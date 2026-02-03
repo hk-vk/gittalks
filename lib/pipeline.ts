@@ -1,39 +1,37 @@
 // GitTalks - Main Pipeline Orchestrator
 
-import { v4 as uuidv4 } from "uuid";
 import * as db from "./db";
+import { initializeDb, type Job, type Playlist, type Episode, type ConversationStyle, type JobStatus } from "./db";
 import { fetchRepository, parseRepoUrl } from "./github";
-import { analyzeRepository, generateAllEpisodesContent, cleanTextForTTS } from "./llm";
+import { analyzeRepository, generateAllEpisodesContent } from "./llm";
 import { synthesizeEpisode, saveAudioToStorage } from "./tts";
-import type {
-  Job,
-  Playlist,
-  Episode,
-  PipelineContext,
-  FetchRepoOutput,
-  AnalysisOutput,
-  GeneratedContent,
-  ConversationStyle,
-  JobStatus,
-} from "./types";
 
 // Pipeline result
 export interface PipelineResult {
   success: boolean;
-  job: Job;
+  job: Job | null;
   playlist?: Playlist;
   episodes?: Episode[];
   error?: string;
 }
 
+// Ensure database is initialized
+let dbInitialized = false;
+async function ensureDbInitialized() {
+  if (!dbInitialized) {
+    await initializeDb();
+    dbInitialized = true;
+  }
+}
+
 // Update job status helper
-function updateStatus(
+async function updateStatus(
   jobId: string,
   status: JobStatus,
   step: string,
   error?: string
 ) {
-  db.updateJobStatus(jobId, status, step, error);
+  await db.updateJobStatus(jobId, status, step, error);
   console.log(`[Job ${jobId}] ${status}: ${step}`);
 }
 
@@ -43,6 +41,8 @@ export async function runPipeline(
   userId: string,
   conversationStyle: ConversationStyle = "single"
 ): Promise<PipelineResult> {
+  await ensureDbInitialized();
+  
   // Parse repo URL
   let owner: string;
   let name: string;
@@ -54,38 +54,25 @@ export async function runPipeline(
   } catch (error) {
     return {
       success: false,
-      job: {
-        id: "",
-        repo_url: repoUrl,
-        owner: "",
-        name: "",
-        user_id: userId,
-        status: "failed",
-        current_step: "parsing",
-        playlist_id: null,
-        error_message: (error as Error).message,
-        conversation_style: conversationStyle,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        completed_at: new Date().toISOString(),
-      },
+      job: null,
       error: (error as Error).message,
     };
   }
 
   // Check if we already have this playlist
-  const existingPlaylist = db.getPlaylistByRepo(owner, name);
+  const existingPlaylist = await db.getPlaylistByRepo(owner, name);
   if (existingPlaylist) {
-    const existingEpisodes = db.getEpisodesByPlaylist(existingPlaylist.id);
-    if (existingEpisodes.length > 0 && existingEpisodes[0].audio_url) {
+    const existingEpisodes = await db.getEpisodesByPlaylist(existingPlaylist.id);
+    if (existingEpisodes.length > 0 && existingEpisodes[0].audioUrl) {
       // Return existing playlist
-      const dummyJob = db.createJob(repoUrl, owner, name, userId, conversationStyle);
-      db.updateJobStatus(dummyJob.id, "completed", "cached");
-      db.setJobPlaylist(dummyJob.id, existingPlaylist.id);
+      const dummyJob = await db.createJob(repoUrl, owner, name, userId, conversationStyle);
+      await db.updateJobStatus(dummyJob.id, "completed", "cached");
+      await db.setJobPlaylist(dummyJob.id, existingPlaylist.id);
       
+      const updatedJob = await db.getJobById(dummyJob.id);
       return {
         success: true,
-        job: db.getJobById(dummyJob.id)!,
+        job: updatedJob,
         playlist: existingPlaylist,
         episodes: existingEpisodes,
       };
@@ -93,22 +80,22 @@ export async function runPipeline(
   }
 
   // Create job
-  const job = db.createJob(repoUrl, owner, name, userId, conversationStyle);
+  const job = await db.createJob(repoUrl, owner, name, userId, conversationStyle);
   const jobId = job.id;
 
   try {
     // Step 1: Fetch repository
-    updateStatus(jobId, "fetching", "Fetching repository data from GitHub");
+    await updateStatus(jobId, "fetching", "Fetching repository data from GitHub");
     const repoData = await fetchRepository(owner, name);
     console.log(`[Job ${jobId}] Fetched ${repoData.files.length} files, ${repoData.fileContents.length} with content`);
 
     // Step 2: Analyze repository
-    updateStatus(jobId, "analyzing", "Analyzing repository structure");
+    await updateStatus(jobId, "analyzing", "Analyzing repository structure");
     const analysis = await analyzeRepository(owner, name, repoData);
     console.log(`[Job ${jobId}] Created ${analysis.episodes.length} episode outlines`);
 
     // Step 3: Create playlist
-    const playlist = db.createPlaylist(
+    const playlist = await db.createPlaylist(
       analysis.suggestedTitle,
       analysis.suggestedDescription,
       owner,
@@ -116,13 +103,13 @@ export async function runPipeline(
       repoUrl,
       userId
     );
-    db.setJobPlaylist(jobId, playlist.id);
+    await db.setJobPlaylist(jobId, playlist.id);
 
     // Create episode records
     const episodeRecords: Episode[] = [];
     for (let i = 0; i < analysis.episodes.length; i++) {
       const outline = analysis.episodes[i];
-      const episode = db.createEpisode(
+      const episode = await db.createEpisode(
         playlist.id,
         outline.title,
         outline.description,
@@ -134,7 +121,7 @@ export async function runPipeline(
     }
 
     // Step 4: Generate content
-    updateStatus(jobId, "generating-content", "Generating podcast scripts with AI");
+    await updateStatus(jobId, "generating-content", "Generating podcast scripts with AI");
     const content = await generateAllEpisodesContent(
       owner,
       name,
@@ -144,7 +131,7 @@ export async function runPipeline(
     );
 
     // Step 5: Generate audio
-    updateStatus(jobId, "generating-audio", "Converting scripts to audio");
+    await updateStatus(jobId, "generating-audio", "Converting scripts to audio");
     let totalDuration = 0;
 
     for (let i = 0; i < content.episodes.length; i++) {
@@ -164,11 +151,12 @@ export async function runPipeline(
       const audioFileName = `${playlist.id}_episode_${i + 1}`;
       const audioUrl = await saveAudioToStorage(
         audioResult.audioData,
-        audioFileName
+        audioFileName,
+        audioResult.format || "wav"
       );
 
       // Update episode with audio info
-      db.updateEpisodeAudio(
+      await db.updateEpisodeAudio(
         episodeRecord.id,
         audioUrl,
         Math.round(audioResult.durationSecs),
@@ -176,7 +164,7 @@ export async function runPipeline(
       );
 
       // Update episode content
-      db.updateEpisodeContent(
+      await db.updateEpisodeContent(
         episodeRecord.id,
         episodeContent.audioScript,
         episodeContent.showNotes
@@ -185,28 +173,36 @@ export async function runPipeline(
       totalDuration += audioResult.durationSecs;
 
       // Update episode record with new data
-      episodeRecords[i] = db.getEpisodeById(episodeRecord.id)!;
+      const updated = await db.getEpisodeById(episodeRecord.id);
+      if (updated) episodeRecords[i] = updated;
     }
 
     // Update playlist duration
-    db.updatePlaylistDuration(playlist.id, Math.round(totalDuration));
+    await db.updatePlaylistDuration(playlist.id, Math.round(totalDuration));
 
     // Mark job as completed
-    updateStatus(jobId, "completed", "Pipeline completed successfully");
+    await updateStatus(jobId, "completed", "Pipeline completed successfully");
+
+    const finalJob = await db.getJobById(jobId);
+    const finalPlaylist = await db.getPlaylistById(playlist.id);
+    const finalEpisodes = await Promise.all(
+      episodeRecords.map(e => db.getEpisodeById(e.id))
+    );
 
     return {
       success: true,
-      job: db.getJobById(jobId)!,
-      playlist: db.getPlaylistById(playlist.id)!,
-      episodes: episodeRecords.map((e) => db.getEpisodeById(e.id)!),
+      job: finalJob,
+      playlist: finalPlaylist || undefined,
+      episodes: finalEpisodes.filter((e): e is Episode => e !== null),
     };
   } catch (error) {
     const errorMessage = (error as Error).message;
-    updateStatus(jobId, "failed", "Pipeline failed", errorMessage);
+    await updateStatus(jobId, "failed", "Pipeline failed", errorMessage);
 
+    const failedJob = await db.getJobById(jobId);
     return {
       success: false,
-      job: db.getJobById(jobId)!,
+      job: failedJob,
       error: errorMessage,
     };
   }
@@ -214,7 +210,9 @@ export async function runPipeline(
 
 // Get job status with details
 export async function getJobStatus(jobId: string): Promise<PipelineResult | null> {
-  const job = db.getJobById(jobId);
+  await ensureDbInitialized();
+  
+  const job = await db.getJobById(jobId);
   if (!job) return null;
 
   const result: PipelineResult = {
@@ -222,30 +220,34 @@ export async function getJobStatus(jobId: string): Promise<PipelineResult | null
     job,
   };
 
-  if (job.playlist_id) {
-    result.playlist = db.getPlaylistById(job.playlist_id) || undefined;
-    if (result.playlist) {
-      result.episodes = db.getEpisodesByPlaylist(result.playlist.id);
+  if (job.playlistId) {
+    const playlist = await db.getPlaylistById(job.playlistId);
+    result.playlist = playlist || undefined;
+    if (playlist) {
+      result.episodes = await db.getEpisodesByPlaylist(playlist.id);
     }
   }
 
-  if (job.status === "failed" && job.error_message) {
-    result.error = job.error_message;
+  if (job.status === "failed" && job.errorMessage) {
+    result.error = job.errorMessage;
   }
 
   return result;
 }
 
 // Get playlist by owner/repo
-export function getPlaylistByRepo(owner: string, name: string) {
-  const playlist = db.getPlaylistByRepo(owner, name);
+export async function getPlaylistByRepo(owner: string, name: string) {
+  await ensureDbInitialized();
+  
+  const playlist = await db.getPlaylistByRepo(owner, name);
   if (!playlist) return null;
 
-  const episodes = db.getEpisodesByPlaylist(playlist.id);
+  const episodes = await db.getEpisodesByPlaylist(playlist.id);
   return { playlist, episodes };
 }
 
 // Get recent playlists for homepage
-export function getRecentPlaylists(limit: number = 10) {
+export async function getRecentPlaylists(limit: number = 10) {
+  await ensureDbInitialized();
   return db.getRecentPlaylists(limit);
 }

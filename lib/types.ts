@@ -142,7 +142,7 @@ export interface WordTimestamp {
 export interface TTSSynthesizeResult {
   audioData: Buffer;
   durationSecs: number;
-  format: "mp3";
+  format: "mp3" | "wav";
   wordTimestamps?: WordTimestamp[];
 }
 
@@ -153,22 +153,25 @@ export interface DialogueTurnInput {
 }
 
 // ============================================
-// Database Types
+// Database Types (match schema.ts)
 // ============================================
+// Note: These types are now primarily defined in schema.ts via Drizzle ORM
+// These are kept for backward compatibility but prefer using types from db.ts
+
 export interface Job {
   id: string;
-  repo_url: string;
+  repoUrl: string;
   owner: string;
   name: string;
-  user_id: string;
+  userId: string;
   status: JobStatus;
-  current_step: string | null;
-  playlist_id: string | null;
-  error_message: string | null;
-  conversation_style: ConversationStyle;
-  created_at: string;
-  updated_at: string;
-  completed_at: string | null;
+  currentStep: string | null;
+  playlistId: string | null;
+  errorMessage: string | null;
+  conversationStyle: ConversationStyle;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
 }
 
 export interface Playlist {
@@ -176,29 +179,30 @@ export interface Playlist {
   title: string;
   description: string | null;
   owner: string;
-  repo_name: string;
-  repo_url: string;
-  user_id: string;
-  total_duration_secs: number;
-  is_public: number;
-  created_at: string;
-  updated_at: string;
+  repoName: string;
+  repoUrl: string;
+  userId: string;
+  totalDurationSecs: number;
+  isPublic: boolean;
+  createdAt: string;
+  updatedAt: string;
+  coverImageUrl?: string | null;
 }
 
 export interface Episode {
   id: string;
-  playlist_id: string;
+  playlistId: string;
   title: string;
   description: string | null;
-  episode_number: number;
-  audio_url: string | null;
-  duration_secs: number;
+  episodeNumber: number;
+  audioUrl: string | null;
+  durationSecs: number;
   transcript: string | null;
-  show_notes: string | null;
-  word_timestamps: string | null;
-  is_free: number;
-  conversation_style: ConversationStyle;
-  created_at: string;
+  showNotes: string | null;
+  wordTimestamps: string | null;
+  isFree: boolean;
+  conversationStyle: ConversationStyle;
+  createdAt: string;
 }
 
 // ============================================

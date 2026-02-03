@@ -35,7 +35,32 @@ interface WordTimestamp {
   text: string;
 }
 
+interface ProgressEvent {
+  type: "progress" | "step" | "error" | "complete";
+  step: string;
+  description: string;
+  progress: number;
+  subStep?: string;
+  data?: {
+    playlist?: Playlist;
+    episodes?: Episode[];
+  };
+}
+
 type GenerationStatus = "idle" | "checking" | "generating" | "completed" | "error";
+
+// Step icons
+const STEP_ICONS: Record<string, string> = {
+  parsing: "🔗",
+  checking: "🔍",
+  fetching: "📥",
+  analyzing: "🧠",
+  "generating-content": "✍️",
+  "generating-audio": "🎙️",
+  done: "✅",
+  error: "❌",
+  cached: "⚡",
+};
 
 export default function PlayerPage({ params }: { params: Promise<{ owner: string; repo: string }> }) {
   const { owner, repo } = use(params);
@@ -51,8 +76,13 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [activeWord, setActiveWord] = useState<string>("");
-  const [generationStep, setGenerationStep] = useState<string>("");
   const [conversationStyle, setConversationStyle] = useState<"single" | "duo">("single");
+  
+  // Progress state
+  const [progress, setProgress] = useState(0);
+  const [progressStep, setProgressStep] = useState("");
+  const [progressDescription, setProgressDescription] = useState("");
+  const [progressSubStep, setProgressSubStep] = useState("");
 
   // Check if playlist exists on mount
   useEffect(() => {
@@ -138,7 +168,84 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
   async function generatePodcast() {
     setStatus("generating");
     setError(null);
-    setGenerationStep("Starting generation...");
+    setProgress(0);
+    setProgressStep("starting");
+    setProgressDescription("Initializing...");
+    setProgressSubStep("");
+
+    try {
+      const response = await fetch("/api/generate/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          repoUrl: `https://github.com/${owner}/${repo}`,
+          conversationStyle,
+        }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.error || "Generation failed");
+      }
+
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+
+      if (!reader) {
+        throw new Error("No response stream");
+      }
+
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        
+        if (done) break;
+        
+        buffer += decoder.decode(value, { stream: true });
+        
+        // Process complete events
+        const lines = buffer.split("\n\n");
+        buffer = lines.pop() || ""; // Keep incomplete data in buffer
+        
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const event: ProgressEvent = JSON.parse(line.slice(6));
+              
+              setProgress(event.progress);
+              setProgressStep(event.step);
+              setProgressDescription(event.description);
+              setProgressSubStep(event.subStep || "");
+
+              if (event.type === "error") {
+                throw new Error(event.description);
+              }
+
+              if (event.type === "complete" && event.data) {
+                setPlaylist(event.data.playlist || null);
+                setEpisodes(event.data.episodes || []);
+                setStatus("completed");
+                return;
+              }
+            } catch (parseError) {
+              // Skip malformed events
+              console.error("Parse error:", parseError);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      setError((err as Error).message);
+      setStatus("error");
+    }
+  }
+
+  // Old non-streaming function (backup)
+  async function generatePodcastLegacy() {
+    setStatus("generating");
+    setError(null);
+    setProgressDescription("Starting generation...");
 
     try {
       const res = await fetch("/api/generate", {
@@ -226,13 +333,64 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
             )}
 
             {isGenerating ? (
-              <div className="space-y-6">
-                <div className="flex items-center justify-center gap-3">
-                  <div className="w-6 h-6 border-2 border-[#00ff88] border-t-transparent rounded-full animate-spin" />
-                  <span className="text-[#888]">{generationStep || "Generating podcast..."}</span>
+              <div className="space-y-8">
+                {/* Progress Bar Container */}
+                <div className="w-full max-w-md mx-auto">
+                  {/* Progress percentage */}
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-2xl font-bold text-[#00ff88]">{progress}%</span>
+                    <span className="text-sm text-[#666]">
+                      {progress < 100 ? "Generating..." : "Complete!"}
+                    </span>
+                  </div>
+                  
+                  {/* Progress bar track */}
+                  <div className="w-full h-3 bg-[#1a1a1a] rounded-full overflow-hidden">
+                    <div 
+                      className="h-full bg-gradient-to-r from-[#00ff88] to-[#00cc66] rounded-full transition-all duration-500 ease-out"
+                      style={{ width: `${progress}%` }}
+                    />
+                  </div>
                 </div>
-                <p className="text-sm text-[#666]">
-                  This may take 2-5 minutes depending on repository size.
+
+                {/* Current step with icon */}
+                <div className="flex flex-col items-center gap-3">
+                  <div className="flex items-center gap-3 px-6 py-3 bg-[#111] border border-[#222] rounded-xl">
+                    <span className="text-2xl">{STEP_ICONS[progressStep] || "⏳"}</span>
+                    <span className="text-lg font-medium">{progressDescription}</span>
+                  </div>
+                  
+                  {/* Sub-step details */}
+                  {progressSubStep && (
+                    <p className="text-sm text-[#666] max-w-md text-pretty">
+                      {progressSubStep}
+                    </p>
+                  )}
+                </div>
+
+                {/* Steps indicator */}
+                <div className="flex justify-center gap-2 mt-6">
+                  {["fetching", "analyzing", "generating-content", "generating-audio"].map((step, i) => {
+                    const stepProgress = [10, 20, 35, 55][i];
+                    const isActive = progress >= stepProgress;
+                    const isCurrent = progressStep === step;
+                    return (
+                      <div
+                        key={step}
+                        className={`w-3 h-3 rounded-full transition-all ${
+                          isCurrent 
+                            ? "bg-[#00ff88] scale-125 animate-pulse" 
+                            : isActive 
+                              ? "bg-[#00ff88]" 
+                              : "bg-[#333]"
+                        }`}
+                      />
+                    );
+                  })}
+                </div>
+
+                <p className="text-xs text-[#555] mt-4">
+                  This may take 2-5 minutes depending on repository size
                 </p>
               </div>
             ) : (
