@@ -77,7 +77,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [activeWord, setActiveWord] = useState<string>("");
-  const [conversationStyle, setConversationStyle] = useState<"single" | "duo">("single");
+  const [conversationStyle, setConversationStyle] = useState<"single" | "duo">("duo");
   
   // Progress state - use maxProgress to prevent bar from going backwards
   const [progress, setProgressRaw] = useState(0);
@@ -386,8 +386,13 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
     const url = currentAudioUrl;
     if (!url) return null;
     
-    // Use the direct URL - with our TTS chunking and Xing headers, seeking should work
-    return url;
+    // If it's a local URL, use it directly
+    if (url.startsWith("/")) {
+      return url;
+    }
+    
+    // For external URLs (Tigris, S3, etc.), proxy through our API to handle CORS
+    return `/api/audio/${encodeURIComponent(url)}`;
   }, [currentAudioUrl]);
 
   const currentEpisodeData = episodes[currentEpisode];
@@ -483,31 +488,6 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                 </p>
 
                 <div className="space-y-4">
-                  <div className="flex justify-center gap-4">
-                    <button
-                      onClick={() => setConversationStyle("single")}
-                      className={`px-6 py-3 rounded-xl border-2 transition-all ${
-                        conversationStyle === "single"
-                          ? "border-[#00ff88] bg-[#00ff88]/10 text-[#00ff88]"
-                          : "border-[#333] hover:border-[#555]"
-                      }`}
-                    >
-                      <div className="font-semibold">Single Host</div>
-                      <div className="text-xs text-[#888] mt-1">Traditional narration</div>
-                    </button>
-                    <button
-                      onClick={() => setConversationStyle("duo")}
-                      className={`px-6 py-3 rounded-xl border-2 transition-all ${
-                        conversationStyle === "duo"
-                          ? "border-[#00ff88] bg-[#00ff88]/10 text-[#00ff88]"
-                          : "border-[#333] hover:border-[#555]"
-                      }`}
-                    >
-                      <div className="font-semibold">Two Hosts</div>
-                      <div className="text-xs text-[#888] mt-1">Conversation style</div>
-                    </button>
-                  </div>
-
                   <button
                     onClick={generatePodcast}
                     className="px-8 py-4 bg-[#00ff88] text-[#0a0a0a] rounded-xl font-semibold text-lg hover:bg-[#00dd77] transition-all hover:scale-105 active:scale-95"
@@ -517,7 +497,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                 </div>
 
                 <p className="text-xs text-[#555]">
-                  Powered by AI • Uses Google Gemini for content • Edge TTS for audio
+                  Powered by AI • Two-host conversation style • Kokoro TTS for audio
                 </p>
               </div>
             )}

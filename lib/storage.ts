@@ -1,15 +1,78 @@
 // GitTalks - Storage Layer
-// Supports local filesystem storage and UploadThing for cloud deployment
+// Supports Tigris (primary), Backblaze B2, Cloudflare R2 (alternatives), or local filesystem
 
-import { UTApi } from "uploadthing/server";
+import { S3Client, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { promises as fs } from "fs";
 import path from "path";
 
-// Storage mode - uses UploadThing when token is set, otherwise local
-const USE_UPLOADTHING = !!process.env.UPLOADTHING_TOKEN;
+// Tigris Configuration (recommended - 5GB free, global CDN)
+const TIGRIS_ACCESS_KEY = process.env.AWS_ACCESS_KEY_ID || process.env.TIGRIS_ACCESS_KEY;
+const TIGRIS_SECRET_KEY = process.env.AWS_SECRET_ACCESS_KEY || process.env.TIGRIS_SECRET_KEY;
+const TIGRIS_BUCKET_NAME = process.env.BUCKET_NAME || process.env.TIGRIS_BUCKET_NAME || "gittalks";
+const TIGRIS_ENDPOINT = process.env.AWS_ENDPOINT_URL_S3 || "https://fly.storage.tigris.dev";
+const TIGRIS_PUBLIC_URL = process.env.TIGRIS_PUBLIC_URL; // e.g., https://your-bucket.fly.storage.tigris.dev
 
-// Initialize UTApi for server-side uploads
-const utapi = USE_UPLOADTHING ? new UTApi() : null;
+// Backblaze B2 Configuration (alternative - 10GB free)
+const B2_KEY_ID = process.env.B2_KEY_ID;
+const B2_APP_KEY = process.env.B2_APP_KEY;
+const B2_BUCKET_NAME = process.env.B2_BUCKET_NAME || "gittalks";
+const B2_ENDPOINT = process.env.B2_ENDPOINT;
+const B2_PUBLIC_URL = process.env.B2_PUBLIC_URL;
+
+// Cloudflare R2 Configuration (alternative)
+const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
+const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
+const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
+const R2_BUCKET_NAME = process.env.R2_BUCKET_NAME || "gittalks";
+const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL;
+
+// Determine which storage to use (priority: Tigris > B2 > R2 > local)
+const USE_TIGRIS = !!(TIGRIS_ACCESS_KEY && TIGRIS_SECRET_KEY);
+const USE_B2 = !USE_TIGRIS && !!(B2_KEY_ID && B2_APP_KEY && B2_ENDPOINT);
+const USE_R2 = !USE_TIGRIS && !USE_B2 && !!(R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY);
+const STORAGE_TYPE = USE_TIGRIS ? "tigris" : USE_B2 ? "backblaze-b2" : USE_R2 ? "cloudflare-r2" : "local";
+
+// Initialize S3 client
+let s3Client: S3Client | null = null;
+let bucketName = "";
+let publicUrl = "";
+
+if (USE_TIGRIS) {
+  s3Client = new S3Client({
+    region: "auto",
+    endpoint: TIGRIS_ENDPOINT,
+    credentials: {
+      accessKeyId: TIGRIS_ACCESS_KEY!,
+      secretAccessKey: TIGRIS_SECRET_KEY!,
+    },
+  });
+  bucketName = TIGRIS_BUCKET_NAME;
+  // Tigris public URL - derive from endpoint
+  const endpointHost = TIGRIS_ENDPOINT.replace("https://", "").replace("http://", "");
+  publicUrl = TIGRIS_PUBLIC_URL || `https://${TIGRIS_BUCKET_NAME}.${endpointHost}`;
+} else if (USE_B2) {
+  s3Client = new S3Client({
+    region: "auto",
+    endpoint: B2_ENDPOINT,
+    credentials: {
+      accessKeyId: B2_KEY_ID!,
+      secretAccessKey: B2_APP_KEY!,
+    },
+  });
+  bucketName = B2_BUCKET_NAME;
+  publicUrl = B2_PUBLIC_URL || "";
+} else if (USE_R2) {
+  s3Client = new S3Client({
+    region: "auto",
+    endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    credentials: {
+      accessKeyId: R2_ACCESS_KEY_ID!,
+      secretAccessKey: R2_SECRET_ACCESS_KEY!,
+    },
+  });
+  bucketName = R2_BUCKET_NAME;
+  publicUrl = R2_PUBLIC_URL || `https://${R2_BUCKET_NAME}.${R2_ACCOUNT_ID}.r2.dev`;
+}
 
 // Local audio directory
 const LOCAL_AUDIO_DIR = path.join(process.cwd(), "public", "audio");
@@ -37,22 +100,25 @@ export async function uploadAudio(
 ): Promise<string> {
   const mimeType = format === "wav" ? "audio/wav" : "audio/mpeg";
   const extension = format;
+  const key = `audio/${filename}.${extension}`;
   
-  if (USE_UPLOADTHING && utapi) {
-    // Upload to UploadThing
-    // Convert Buffer to Uint8Array for File constructor compatibility
-    const uint8Array = new Uint8Array(audioBuffer);
-    const file = new File([uint8Array], `${filename}.${extension}`, {
-      type: mimeType,
+  if (s3Client) {
+    // Upload to cloud storage (B2 or R2)
+    const command = new PutObjectCommand({
+      Bucket: bucketName,
+      Key: key,
+      Body: audioBuffer,
+      ContentType: mimeType,
     });
     
-    const response = await utapi.uploadFiles([file]);
+    await s3Client.send(command);
     
-    if (response[0]?.error) {
-      throw new Error(`UploadThing error: ${response[0].error.message}`);
+    // Return public URL
+    if (publicUrl) {
+      return `${publicUrl}/${key}`;
     }
-    
-    return response[0]?.data?.ufsUrl || response[0]?.data?.url || "";
+    // Fallback - this shouldn't happen if configured correctly
+    return `/${key}`;
   } else {
     // Save to local filesystem
     await ensureAudioDir();
@@ -66,13 +132,19 @@ export async function uploadAudio(
  * Delete audio file from storage
  */
 export async function deleteAudio(url: string): Promise<void> {
-  if (USE_UPLOADTHING && utapi && url.includes("ufs.sh")) {
-    // Extract key from URL and delete
-    const key = url.split("/").pop();
-    if (key) {
-      await utapi.deleteFiles([key]);
+  if (s3Client) {
+    // Extract key from URL
+    const urlParts = url.split("/");
+    const keyIndex = urlParts.findIndex(part => part === "audio");
+    if (keyIndex >= 0) {
+      const key = urlParts.slice(keyIndex).join("/");
+      const command = new DeleteObjectCommand({
+        Bucket: bucketName,
+        Key: key,
+      });
+      await s3Client.send(command);
     }
-  } else if (!USE_UPLOADTHING) {
+  } else {
     // Delete local file
     const filename = url.split("/").pop();
     if (filename) {
@@ -90,9 +162,22 @@ export async function deleteAudio(url: string): Promise<void> {
  * List all audio files in storage
  */
 export async function listAudioFiles(): Promise<string[]> {
-  if (USE_UPLOADTHING && utapi) {
-    const result = await utapi.listFiles({ limit: 500 });
-    return result.files.map((f) => f.key);
+  if (s3Client) {
+    const command = new ListObjectsV2Command({
+      Bucket: bucketName,
+      Prefix: "audio/",
+      MaxKeys: 500,
+    });
+    
+    const response = await s3Client.send(command);
+    const files = response.Contents?.map(obj => obj.Key).filter(Boolean) as string[] || [];
+    
+    return files.map(key => {
+      if (publicUrl) {
+        return `${publicUrl}/${key}`;
+      }
+      return `/${key}`;
+    });
   } else {
     await ensureAudioDir();
     const files = await fs.readdir(LOCAL_AUDIO_DIR);
@@ -106,7 +191,7 @@ export async function listAudioFiles(): Promise<string[]> {
  * Check if using cloud storage
  */
 export function isUsingCloudStorage(): boolean {
-  return USE_UPLOADTHING;
+  return !!s3Client;
 }
 
 /**
@@ -114,7 +199,7 @@ export function isUsingCloudStorage(): boolean {
  */
 export function getStorageInfo(): { type: string; configured: boolean } {
   return {
-    type: USE_UPLOADTHING ? "uploadthing" : "local",
+    type: STORAGE_TYPE,
     configured: true,
   };
 }

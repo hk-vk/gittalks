@@ -39,7 +39,7 @@ async function updateStatus(
 export async function runPipeline(
   repoUrl: string,
   userId: string,
-  conversationStyle: ConversationStyle = "single"
+  conversationStyle: ConversationStyle = "duo"
 ): Promise<PipelineResult> {
   await ensureDbInitialized();
   
@@ -130,11 +130,13 @@ export async function runPipeline(
       conversationStyle
     );
 
-    // Step 5: Generate audio
+    // Step 5: Generate audio - PARALLEL processing for speed
     await updateStatus(jobId, "generating-audio", "Converting scripts to audio");
-    let totalDuration = 0;
-
-    for (let i = 0; i < content.episodes.length; i++) {
+    
+    // Process episodes in parallel (with concurrency limit to avoid overwhelming APIs)
+    const CONCURRENCY_LIMIT = 3; // Process 3 episodes at a time
+    
+    const processEpisode = async (i: number) => {
       const episodeContent = content.episodes[i];
       const episodeRecord = episodeRecords[i];
 
@@ -170,10 +172,25 @@ export async function runPipeline(
         episodeContent.showNotes
       );
 
-      totalDuration += audioResult.durationSecs;
+      console.log(`[Job ${jobId}] Episode ${i + 1} complete - ${audioResult.durationSecs.toFixed(1)}s audio`);
+      
+      return audioResult.durationSecs;
+    };
 
-      // Update episode record with new data
-      const updated = await db.getEpisodeById(episodeRecord.id);
+    // Process in batches for controlled parallelism
+    let totalDuration = 0;
+    for (let i = 0; i < content.episodes.length; i += CONCURRENCY_LIMIT) {
+      const batch = [];
+      for (let j = i; j < Math.min(i + CONCURRENCY_LIMIT, content.episodes.length); j++) {
+        batch.push(processEpisode(j));
+      }
+      const batchDurations = await Promise.all(batch);
+      totalDuration += batchDurations.reduce((sum, d) => sum + d, 0);
+    }
+
+    // Refresh episode records with updated data
+    for (let i = 0; i < episodeRecords.length; i++) {
+      const updated = await db.getEpisodeById(episodeRecords[i].id);
       if (updated) episodeRecords[i] = updated;
     }
 

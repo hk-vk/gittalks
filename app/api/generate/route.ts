@@ -10,7 +10,7 @@ export const maxDuration = 300; // 5 minutes max for serverless
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { repoUrl, conversationStyle = "single" } = body as {
+    const { repoUrl, conversationStyle = "duo" } = body as {
       repoUrl?: string;
       conversationStyle?: ConversationStyle;
     };

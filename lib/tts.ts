@@ -49,8 +49,8 @@ export const DEFAULT_VOICE = USE_KOKORO
 // Voice pairings for duo mode
 export const DUO_VOICES = USE_KOKORO
   ? {
-      host_expert: "am_adam",
-      host_curious: "af_nicole",
+      host_expert: "am_adam",        // Male expert host
+      host_curious: "af_bella",      // Female curious host (warm, engaging voice)
     }
   : {
       host_expert: "en-US-BrianMultilingualNeural",

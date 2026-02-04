@@ -42,7 +42,7 @@ export async function createJob(
   owner: string,
   name: string,
   userId: string,
-  conversationStyle: ConversationStyle = "single"
+  conversationStyle: ConversationStyle = "duo"
 ): Promise<Job> {
   const db = getDb();
   const id = uuidv4();

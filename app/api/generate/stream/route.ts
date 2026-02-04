@@ -35,7 +35,7 @@ function sendEvent(controller: ReadableStreamDefaultController, event: ProgressE
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
-  const { repoUrl, conversationStyle = "single" } = body as {
+  const { repoUrl, conversationStyle = "duo" } = body as {
     repoUrl?: string;
     conversationStyle?: ConversationStyle;
   };
