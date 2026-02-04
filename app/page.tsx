@@ -3,13 +3,17 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, FormEvent } from "react";
+import { useSession, signIn, signOut } from "@/lib/auth-client";
 
 export default function HomePage() {
   const router = useRouter();
   const [repoInput, setRepoInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const { data: session, isPending } = useSession();
 
   const popularRepos = [
+    { owner: "github", name: "copilot-cli", stars: "10k", description: "GitHub Copilot in the terminal" },
     { owner: "vercel", name: "next.js", stars: "120k", description: "The React Framework for the Web" },
     { owner: "facebook", name: "react", stars: "220k", description: "The library for web and native interfaces" },
     { owner: "microsoft", name: "vscode", stars: "158k", description: "Visual Studio Code" },
@@ -53,11 +57,129 @@ export default function HomePage() {
           <Link href="/" className="text-xl sm:text-2xl tracking-tight">
             <span className="font-editorial">Git</span><span className="font-editorial italic text-[#00ff88]">talks</span>
           </Link>
-          <div className="flex gap-4 sm:gap-8 text-sm">
+          
+          {/* Desktop Nav */}
+          <div className="hidden sm:flex items-center gap-8 text-sm">
             <Link href="/explore" className="hover:text-[#00ff88] transition-colors">Explore</Link>
             <Link href="/about" className="hover:text-[#00ff88] transition-colors">About</Link>
+            
+            {/* Auth Button */}
+            {isPending ? (
+              <div className="w-8 h-8 rounded-full bg-[#1a1a1a] animate-pulse" />
+            ) : session?.user ? (
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => signOut()}
+                  className="text-[#888] hover:text-red-400 transition-colors text-sm"
+                >
+                  Sign out
+                </button>
+                {session.user.image ? (
+                  <img 
+                    src={session.user.image} 
+                    alt={session.user.name || "User"} 
+                    className="w-8 h-8 rounded-full border border-[#333]"
+                  />
+                ) : (
+                  <div className="w-8 h-8 rounded-full bg-[#00ff88] flex items-center justify-center text-[#0a0a0a] font-bold text-xs">
+                    {session.user.name?.charAt(0) || session.user.email?.charAt(0) || "U"}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <button
+                onClick={() => signIn.social({ provider: "github" })}
+                className="flex items-center gap-2 px-3 py-1.5 bg-[#1a1a1a] border border-[#333] rounded-lg hover:border-[#00ff88] hover:text-[#00ff88] transition-all"
+              >
+                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+                </svg>
+                Sign in
+              </button>
+            )}
+          </div>
+
+          {/* Mobile Nav */}
+          <div className="flex sm:hidden items-center gap-3">
+            {/* Sign in button - always visible on mobile */}
+            {isPending ? (
+              <div className="w-8 h-8 rounded-full bg-[#1a1a1a] animate-pulse" />
+            ) : session?.user ? (
+              session.user.image ? (
+                <img 
+                  src={session.user.image} 
+                  alt={session.user.name || "User"} 
+                  className="w-8 h-8 rounded-full border border-[#333]"
+                />
+              ) : (
+                <div className="w-8 h-8 rounded-full bg-[#00ff88] flex items-center justify-center text-[#0a0a0a] font-bold text-xs">
+                  {session.user.name?.charAt(0) || session.user.email?.charAt(0) || "U"}
+                </div>
+              )
+            ) : (
+              <button
+                onClick={() => signIn.social({ provider: "github" })}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-[#1a1a1a] border border-[#333] rounded-lg hover:border-[#00ff88] transition-all text-sm"
+                aria-label="Sign in with GitHub"
+              >
+                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+                </svg>
+                Sign in
+              </button>
+            )}
+            
+            {/* Hamburger menu button */}
+            <button
+              onClick={() => setMenuOpen(!menuOpen)}
+              className="p-2 rounded-lg hover:bg-[#1a1a1a] transition-colors"
+              aria-label="Toggle menu"
+            >
+              {menuOpen ? (
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              ) : (
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+              )}
+            </button>
           </div>
         </div>
+
+        {/* Mobile Menu Dropdown */}
+        {menuOpen && (
+          <div className="sm:hidden border-t border-[#1a1a1a] bg-[#0a0a0a]/95 backdrop-blur-xl">
+            <div className="px-4 py-4 space-y-3">
+              <Link 
+                href="/explore" 
+                className="block py-2 text-[#888] hover:text-[#00ff88] transition-colors"
+                onClick={() => setMenuOpen(false)}
+              >
+                Explore
+              </Link>
+              <Link 
+                href="/about" 
+                className="block py-2 text-[#888] hover:text-[#00ff88] transition-colors"
+                onClick={() => setMenuOpen(false)}
+              >
+                About
+              </Link>
+              {session?.user && (
+                <button
+                  onClick={() => {
+                    signOut();
+                    setMenuOpen(false);
+                  }}
+                  className="block w-full text-left py-2 text-red-400 hover:text-red-300 transition-colors"
+                >
+                  Sign out
+                </button>
+              )}
+            </div>
+          </div>
+        )}
       </nav>
 
       {/* Hero Section */}
@@ -100,9 +222,25 @@ export default function HomePage() {
                 )}
               </button>
             </form>
-            <p className="mt-3 sm:mt-4 text-xs sm:text-sm text-[#555] font-mono">
-              Example: vercel/next.js or https://github.com/facebook/react
-            </p>
+            
+            {/* Quick Select Options */}
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <span className="text-xs text-[#666]">Try:</span>
+              {[
+                { owner: "github", name: "copilot-cli" },
+                { owner: "vercel", name: "next.js" },
+                { owner: "facebook", name: "react" },
+              ].map((repo) => (
+                <button
+                  key={`${repo.owner}/${repo.name}`}
+                  type="button"
+                  onClick={() => setRepoInput(`${repo.owner}/${repo.name}`)}
+                  className="px-3 py-1.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded-full text-xs font-mono text-[#888] hover:border-[#00ff88] hover:text-[#00ff88] transition-all"
+                >
+                  {repo.owner}/{repo.name}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       </section>

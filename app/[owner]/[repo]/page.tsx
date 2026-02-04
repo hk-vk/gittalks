@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useState, useEffect, use, useRef, useMemo } from "react";
+import { useSession, signIn } from "@/lib/auth-client";
 
 interface Episode {
   id: string;
@@ -47,7 +48,7 @@ interface ProgressEvent {
   };
 }
 
-type GenerationStatus = "idle" | "checking" | "generating" | "completed" | "error";
+type GenerationStatus = "idle" | "checking" | "generating" | "completed" | "error" | "auth-required" | "rate-limited" | "incomplete";
 
 // Step labels (no emojis)
 const STEP_LABELS: Record<string, string> = {
@@ -208,7 +209,30 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
       if (data.exists && data.playlist && data.episodes?.length > 0) {
         setPlaylist(data.playlist);
         setEpisodes(data.episodes);
-        setStatus("completed");
+        
+        // Calculate how many episodes are missing
+        const totalEpisodes = data.totalEpisodes || data.episodes.length;
+        const missingCount = totalEpisodes - data.episodes.length;
+        
+        // Only show incomplete warning if more than 2 episodes are missing
+        // AND if less than 70% of episodes are ready
+        // This means: 7/8 ready (1 missing) = play directly
+        //             6/8 ready (2 missing) = play directly  
+        //             5/8 ready (3 missing) = show warning
+        const completionRatio = data.episodes.length / totalEpisodes;
+        const showWarning = missingCount > 2 && completionRatio < 0.7;
+        
+        if (data.hasIncompleteEpisodes && showWarning) {
+          setStatus("incomplete");
+          setError(`Generation incomplete: ${data.episodes.length}/${totalEpisodes} episodes ready`);
+        } else {
+          // Most episodes ready - just play
+          setStatus("completed");
+        }
+      } else if (data.hasIncompleteEpisodes) {
+        // Playlist exists but no episodes have audio at all
+        setStatus("incomplete");
+        setError("Previous generation failed. Click regenerate to try again.");
       } else {
         setStatus("idle");
       }
@@ -237,6 +261,21 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
 
       if (!response.ok) {
         const data = await response.json();
+        
+        // Handle auth required
+        if (response.status === 401 && data.type === "auth-required") {
+          setStatus("auth-required");
+          setError("Sign in to generate podcasts");
+          return;
+        }
+        
+        // Handle rate limit
+        if (response.status === 429 && data.type === "rate-limited") {
+          setStatus("rate-limited");
+          setError(data.error || "Rate limit exceeded");
+          return;
+        }
+        
         throw new Error(data.error || "Generation failed");
       }
 
@@ -397,6 +436,181 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
 
   const currentEpisodeData = episodes[currentEpisode];
 
+  // Render auth required UI
+  if (status === "auth-required") {
+    return (
+      <main className="min-h-dvh bg-[#0a0a0a] text-[#e8e8e8]">
+        <nav className="fixed top-0 w-full z-50 border-b border-[#1a1a1a] bg-[#0a0a0a]/80 backdrop-blur-xl">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 sm:py-4 flex items-center justify-between">
+            <Link href="/" className="text-xl sm:text-2xl tracking-tight">
+              <span className="font-editorial">Git</span><span className="font-editorial italic text-[#00ff88]">talks</span>
+            </Link>
+            <Link href="/" className="text-sm hover:text-[#00ff88] transition-colors">
+              ← Back
+            </Link>
+          </div>
+        </nav>
+
+        <div className="pt-24 sm:pt-32 pb-20 px-4 sm:px-6">
+          <div className="max-w-2xl mx-auto text-center">
+            <div className="w-20 h-20 sm:w-24 sm:h-24 mx-auto mb-6 sm:mb-8 rounded-2xl sm:rounded-3xl bg-gradient-to-br from-[#00ff88] to-[#00aa66] flex items-center justify-center text-3xl sm:text-4xl font-bold text-[#0a0a0a]">
+              {repo[0]?.toUpperCase() || "?"}
+            </div>
+
+            <h1 className="font-editorial text-3xl sm:text-4xl mb-4">{owner}/{repo}</h1>
+
+            <div className="space-y-6">
+              <div className="p-6 bg-[#111] border border-[#222] rounded-2xl">
+                <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-[#1a1a1a] flex items-center justify-center">
+                  <svg className="w-8 h-8 text-[#00ff88]" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
+                  </svg>
+                </div>
+                <h2 className="text-xl font-semibold mb-2">Sign in to generate</h2>
+                <p className="text-[#888] text-sm mb-6">
+                  Connect your GitHub account to create personalized podcast episodes for any repository.
+                </p>
+                <button
+                  onClick={() => signIn.social({ provider: "github" })}
+                  className="flex items-center justify-center gap-2 mx-auto px-4 py-2 bg-[#1a1a1a] border border-[#333] rounded-lg hover:border-[#00ff88] hover:text-[#00ff88] transition-all"
+                >
+                  <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+                  </svg>
+                  Sign in with GitHub
+                </button>
+              </div>
+
+              <p className="text-xs text-[#555]">
+                Free tier includes 5 podcast generations per month
+              </p>
+            </div>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  // Render rate limit exceeded UI
+  if (status === "rate-limited") {
+    return (
+      <main className="min-h-dvh bg-[#0a0a0a] text-[#e8e8e8]">
+        <nav className="fixed top-0 w-full z-50 border-b border-[#1a1a1a] bg-[#0a0a0a]/80 backdrop-blur-xl">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 sm:py-4 flex items-center justify-between">
+            <Link href="/" className="text-xl sm:text-2xl tracking-tight">
+              <span className="font-editorial">Git</span><span className="font-editorial italic text-[#00ff88]">talks</span>
+            </Link>
+            <Link href="/" className="text-sm hover:text-[#00ff88] transition-colors">
+              ← Back
+            </Link>
+          </div>
+        </nav>
+
+        <div className="pt-24 sm:pt-32 pb-20 px-4 sm:px-6">
+          <div className="max-w-2xl mx-auto text-center">
+            <div className="w-20 h-20 sm:w-24 sm:h-24 mx-auto mb-6 sm:mb-8 rounded-2xl sm:rounded-3xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center text-3xl sm:text-4xl font-bold text-[#0a0a0a]">
+              {repo[0]?.toUpperCase() || "?"}
+            </div>
+
+            <h1 className="font-editorial text-3xl sm:text-4xl mb-4">{owner}/{repo}</h1>
+
+            <div className="space-y-6">
+              <div className="p-6 bg-[#111] border border-amber-500/30 rounded-2xl">
+                <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-amber-500/10 flex items-center justify-center">
+                  <svg className="w-8 h-8 text-amber-500" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </div>
+                <h2 className="text-xl font-semibold mb-2">Monthly limit reached</h2>
+                <p className="text-[#888] text-sm mb-4">
+                  {error || "You've used all 5 podcast generations for this month."}
+                </p>
+                <p className="text-amber-500 text-sm font-medium">
+                  Your limit will reset next month
+                </p>
+              </div>
+
+              <Link
+                href="/"
+                className="inline-flex items-center gap-2 px-4 py-2 bg-[#1a1a1a] border border-[#333] rounded-lg hover:border-[#00ff88] hover:text-[#00ff88] transition-all text-sm"
+              >
+                ← Browse podcasts
+              </Link>
+            </div>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  // Render incomplete generation UI (partial failure - some episodes missing)
+  if (status === "incomplete") {
+    return (
+      <main className="min-h-dvh bg-[#0a0a0a] text-[#e8e8e8]">
+        <nav className="fixed top-0 w-full z-50 border-b border-[#1a1a1a] bg-[#0a0a0a]/80 backdrop-blur-xl">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 sm:py-4 flex items-center justify-between">
+            <Link href="/" className="text-xl sm:text-2xl tracking-tight">
+              <span className="font-editorial">Git</span><span className="font-editorial italic text-[#00ff88]">talks</span>
+            </Link>
+            <Link href="/" className="text-sm hover:text-[#00ff88] transition-colors">
+              ← Back
+            </Link>
+          </div>
+        </nav>
+
+        <div className="pt-24 sm:pt-32 pb-20 px-4 sm:px-6">
+          <div className="max-w-2xl mx-auto text-center">
+            <div className="w-20 h-20 sm:w-24 sm:h-24 mx-auto mb-6 sm:mb-8 rounded-2xl sm:rounded-3xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center text-3xl sm:text-4xl font-bold text-[#0a0a0a]">
+              {repo[0]?.toUpperCase() || "?"}
+            </div>
+
+            <h1 className="font-editorial text-3xl sm:text-4xl mb-4">{owner}/{repo}</h1>
+
+            <div className="space-y-6">
+              <div className="p-6 bg-[#111] border border-amber-500/30 rounded-2xl">
+                <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-amber-500/10 flex items-center justify-center">
+                  <svg className="w-8 h-8 text-amber-500" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+                  </svg>
+                </div>
+                <h2 className="text-xl font-semibold mb-2">Generation incomplete</h2>
+                <p className="text-[#888] text-sm mb-4">
+                  {error || "The previous generation was interrupted or failed. Click regenerate to try again."}
+                </p>
+                {episodes.length > 0 && (
+                  <p className="text-amber-500 text-sm font-medium">
+                    {episodes.length} episode{episodes.length !== 1 ? "s" : ""} ready to play
+                  </p>
+                )}
+              </div>
+
+              <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+                <button
+                  onClick={generatePodcast}
+                  className="flex items-center gap-2 px-4 py-2 bg-[#00ff88] text-[#0a0a0a] rounded-lg font-medium hover:bg-[#00dd77] transition-all text-sm"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                  </svg>
+                  Regenerate
+                </button>
+                
+                {episodes.length > 0 && (
+                  <button
+                    onClick={() => setStatus("completed")}
+                    className="flex items-center gap-2 px-4 py-2 bg-[#1a1a1a] border border-[#333] rounded-lg hover:border-[#00ff88] hover:text-[#00ff88] transition-all text-sm"
+                  >
+                    Play available episodes →
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
   // Render generation UI
   if (status === "idle" || status === "generating" || status === "error") {
     const isGenerating = status === "generating";
@@ -422,8 +636,23 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
             <h1 className="font-editorial text-3xl sm:text-4xl mb-4">{owner}/{repo}</h1>
 
             {status === "error" && error && (
-              <div className="mb-8 p-4 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400 text-sm sm:text-base">
-                {error}
+              <div className="mb-8 p-4 bg-red-500/10 border border-red-500/30 rounded-xl">
+                <div className="flex items-center justify-center gap-3 mb-3">
+                  <svg className="w-5 h-5 text-red-400" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+                  </svg>
+                  <span className="text-red-400 font-medium">Generation Failed</span>
+                </div>
+                <p className="text-red-400/80 text-sm mb-4">{error}</p>
+                <button
+                  onClick={generatePodcast}
+                  className="flex items-center gap-2 mx-auto px-4 py-2 bg-[#1a1a1a] border border-red-500/30 rounded-lg hover:border-red-400 hover:text-red-400 transition-all text-sm"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                  </svg>
+                  Try Again
+                </button>
               </div>
             )}
 
@@ -568,8 +797,8 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
         <section className="mb-8 sm:mb-12 animate-fadeInUp">
           <div className="flex flex-col sm:flex-row sm:items-start gap-4 sm:gap-6">
             {/* Repo Avatar */}
-            <div className="shrink-0 w-20 h-20 sm:w-28 sm:h-28 rounded-2xl bg-gradient-to-br from-[#00ff88] via-[#00cc66] to-[#009944] flex items-center justify-center shadow-lg shadow-[#00ff88]/20">
-              <span className="text-3xl sm:text-5xl font-bold text-[#0a0a0a]">
+            <div className="shrink-0 w-20 h-20 sm:w-28 sm:h-28 rounded-2xl bg-gradient-to-br from-[#1a3a2a] via-[#0d2818] to-[#0a1f14] border border-[#2a2a2a] flex items-center justify-center">
+              <span className="text-3xl sm:text-5xl font-bold text-[#00ff88]">
                 {repo[0]?.toUpperCase() || "?"}
               </span>
             </div>
@@ -605,7 +834,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
           {/* Main Player Column */}
           <div className="space-y-6">
             {/* Now Playing Card */}
-            <div className="p-5 sm:p-8 bg-[#111] border border-[#1a1a1a] rounded-2xl animate-fadeInUp" style={{ animationDelay: "100ms" }}>
+            <div className="p-5 sm:p-8 bg-[#111] border border-[#1a1a1a] rounded-2xl animate-fadeInUp grainy" style={{ animationDelay: "100ms" }}>
               {/* Episode Badge */}
               <div className="flex items-center gap-2 mb-4">
                 <span className="px-2.5 py-1 bg-[#00ff88]/15 text-[#00ff88] text-xs font-bold uppercase tracking-wider rounded-full">
@@ -637,7 +866,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                 >
                   {/* Progress fill */}
                   <div
-                    className="absolute inset-y-0 left-0 bg-[#00ff88] rounded-full transition-all"
+                    className="absolute inset-y-0 left-0 bg-gradient-to-r from-[#00ff88]/80 to-[#00ff88] rounded-full transition-all"
                     style={{ width: duration ? `${(currentTime / duration) * 100}%` : "0%" }}
                   />
                   {/* Hover indicator */}
@@ -665,7 +894,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                 <button
                   onClick={togglePlay}
                   disabled={!currentEpisodeData?.audioUrl}
-                  className="w-16 h-16 rounded-full bg-[#00ff88] flex items-center justify-center hover:bg-[#00dd77] hover:scale-105 active:scale-95 transition-all text-[#0a0a0a] disabled:opacity-40 disabled:cursor-not-allowed shadow-lg shadow-[#00ff88]/30"
+                  className="w-16 h-16 rounded-full bg-[#0d2818] border border-[#2a2a2a] flex items-center justify-center hover:bg-[#143824] hover:border-[#3a3a3a] hover:scale-105 active:scale-95 transition-all text-[#00ff88] disabled:opacity-40 disabled:cursor-not-allowed"
                   aria-label={isPlaying ? "Pause" : "Play"}
                 >
                   {isPlaying ? (
@@ -695,7 +924,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
             {/* Transcript */}
             {currentEpisodeData?.transcript && (
               <details className="group animate-fadeInUp" style={{ animationDelay: "200ms" }}>
-                <summary className="p-5 sm:p-6 bg-[#111] border border-[#1a1a1a] rounded-2xl cursor-pointer hover:border-[#2a2a2a] transition-colors list-none">
+                <summary className="p-5 sm:p-6 bg-[#111] border border-[#1a1a1a] rounded-2xl cursor-pointer hover:border-[#2a2a2a] transition-colors list-none grainy">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <div className="w-10 h-10 rounded-xl bg-[#1a1a1a] flex items-center justify-center">
@@ -713,7 +942,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                     </svg>
                   </div>
                 </summary>
-                <div className="mt-2 p-5 sm:p-6 bg-[#111] border border-[#1a1a1a] rounded-2xl max-h-96 overflow-y-auto">
+                <div className="mt-2 p-5 sm:p-6 bg-[#111] border border-[#1a1a1a] rounded-2xl max-h-96 overflow-y-auto grainy">
                   <p className="text-[#aaa] text-sm leading-relaxed whitespace-pre-wrap">
                     {currentEpisodeData.transcript}
                   </p>
@@ -738,16 +967,16 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                       setCurrentEpisode(idx);
                       setCurrentTime(0);
                     }}
-                    className={`w-full text-left p-4 rounded-xl transition-all group ${
+                    className={`w-full text-left p-4 rounded-xl transition-all group grainy ${
                       idx === currentEpisode
-                        ? "bg-[#00ff88] text-[#0a0a0a]"
-                        : "bg-[#111] border border-[#1a1a1a] hover:border-[#00ff88]/50 hover:bg-[#141414]"
+                        ? "bg-[#0d2818] border border-[#00ff88]/40 text-[#e8e8e8]"
+                        : "bg-[#111] border border-[#1a1a1a] hover:border-[#00ff88]/30 hover:bg-[#141414]"
                     }`}
                   >
                     <div className="flex items-center gap-3">
                       <div className={`shrink-0 w-10 h-10 rounded-lg flex items-center justify-center text-sm font-bold ${
                         idx === currentEpisode 
-                          ? "bg-[#0a0a0a]/20 text-[#0a0a0a]" 
+                          ? "bg-[#00ff88]/20 text-[#00ff88]" 
                           : "bg-[#1a1a1a] text-[#666]"
                       }`}>
                         {idx === currentEpisode && isPlaying ? (
@@ -762,12 +991,12 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className={`text-sm font-medium truncate ${
-                          idx === currentEpisode ? "" : "group-hover:text-[#00ff88]"
+                          idx === currentEpisode ? "text-[#00ff88]" : "group-hover:text-[#00ff88]"
                         }`}>
                           {episode.title}
                         </div>
                         <div className={`text-xs font-mono ${
-                          idx === currentEpisode ? "opacity-70" : "text-[#666]"
+                          idx === currentEpisode ? "text-[#00ff88]/60" : "text-[#666]"
                         }`}>
                           {formatTime(episode.durationSecs)}
                         </div>
@@ -793,16 +1022,16 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                     setCurrentTime(0);
                     window.scrollTo({ top: 0, behavior: "smooth" });
                   }}
-                  className={`w-full text-left p-4 rounded-xl transition-all ${
+                  className={`w-full text-left p-4 rounded-xl transition-all grainy ${
                     idx === currentEpisode
-                      ? "bg-[#00ff88] text-[#0a0a0a]"
+                      ? "bg-[#0d2818] border border-[#00ff88]/40 text-[#e8e8e8]"
                       : "bg-[#111] border border-[#1a1a1a] active:bg-[#1a1a1a]"
                   }`}
                 >
                   <div className="flex items-center gap-3">
                     <div className={`shrink-0 w-10 h-10 rounded-lg flex items-center justify-center text-sm font-bold ${
                       idx === currentEpisode 
-                        ? "bg-[#0a0a0a]/20 text-[#0a0a0a]" 
+                        ? "bg-[#00ff88]/20 text-[#00ff88]" 
                         : "bg-[#1a1a1a] text-[#666]"
                     }`}>
                       {String(episode.episodeNumber).padStart(2, "0")}
@@ -812,7 +1041,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                         {episode.title}
                       </div>
                       <div className={`text-xs font-mono ${
-                        idx === currentEpisode ? "opacity-70" : "text-[#666]"
+                        idx === currentEpisode ? "text-[#00ff88]/60" : "text-[#666]"
                       }`}>
                         {formatTime(episode.durationSecs)}
                       </div>
@@ -837,7 +1066,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
             onClick={seekTo}
           >
             <div
-              className="h-full bg-[#00ff88]"
+              className="h-full bg-gradient-to-r from-[#00ff88]/80 to-[#00ff88]"
               style={{ width: duration ? `${(currentTime / duration) * 100}%` : "0%" }}
             />
           </div>
@@ -857,7 +1086,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
             <button
               onClick={togglePlay}
               disabled={!currentEpisodeData?.audioUrl}
-              className="w-12 h-12 rounded-full bg-[#00ff88] flex items-center justify-center text-[#0a0a0a] disabled:opacity-40"
+              className="w-12 h-12 rounded-full bg-[#0d2818] border border-[#2a2a2a] flex items-center justify-center text-[#00ff88] disabled:opacity-40"
             >
               {isPlaying ? (
                 <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">

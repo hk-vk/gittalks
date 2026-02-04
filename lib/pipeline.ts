@@ -253,18 +253,51 @@ export async function getJobStatus(jobId: string): Promise<PipelineResult | null
 }
 
 // Get playlist by owner/repo
+// Only returns episodes that have completed audio generation
 export async function getPlaylistByRepo(owner: string, name: string) {
   await ensureDbInitialized();
   
   const playlist = await db.getPlaylistByRepo(owner, name);
   if (!playlist) return null;
 
-  const episodes = await db.getEpisodesByPlaylist(playlist.id);
-  return { playlist, episodes };
+  const allEpisodes = await db.getEpisodesByPlaylist(playlist.id);
+  
+  // Filter to only completed episodes (those with audioUrl)
+  const completedEpisodes = allEpisodes.filter(ep => ep.audioUrl);
+  
+  // If no episodes have audio, this is an incomplete/failed generation
+  const isComplete = completedEpisodes.length > 0 && completedEpisodes.length === allEpisodes.length;
+  const hasIncompleteEpisodes = allEpisodes.length > 0 && completedEpisodes.length < allEpisodes.length;
+  
+  return { 
+    playlist, 
+    episodes: completedEpisodes,
+    totalEpisodes: allEpisodes.length,
+    isComplete,
+    hasIncompleteEpisodes,
+  };
 }
 
-// Get recent playlists for homepage
+// Get recent playlists for homepage/explore
+// Only returns playlists that have at least one completed episode
 export async function getRecentPlaylists(limit: number = 10) {
   await ensureDbInitialized();
-  return db.getRecentPlaylists(limit);
+  
+  // Get all recent playlists
+  const allPlaylists = await db.getRecentPlaylists(limit * 2); // Fetch more to account for filtering
+  
+  // Filter to only playlists with completed episodes
+  const completePlaylists = [];
+  for (const playlist of allPlaylists) {
+    const episodes = await db.getEpisodesByPlaylist(playlist.id);
+    const completedEpisodes = episodes.filter(ep => ep.audioUrl);
+    
+    // Only include if at least one episode has audio
+    if (completedEpisodes.length > 0) {
+      completePlaylists.push(playlist);
+      if (completePlaylists.length >= limit) break;
+    }
+  }
+  
+  return completePlaylists;
 }

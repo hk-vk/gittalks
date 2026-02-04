@@ -27,10 +27,16 @@ export async function GET(
       );
     }
 
+    // Only mark as "exists" if there are completed episodes
+    const hasCompletedEpisodes = result.episodes.length > 0;
+
     return NextResponse.json({
-      exists: true,
+      exists: hasCompletedEpisodes,
       playlist: result.playlist,
       episodes: result.episodes,
+      totalEpisodes: result.totalEpisodes,
+      isComplete: result.isComplete,
+      hasIncompleteEpisodes: result.hasIncompleteEpisodes,
     });
   } catch (error) {
     console.error("Playlist API error:", error);

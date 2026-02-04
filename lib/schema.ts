@@ -1,7 +1,76 @@
 // GitTalks - Database Schema (Drizzle ORM + Turso/LibSQL)
 // Proper SQL database with sync capabilities
 
-import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
+import { sql } from "drizzle-orm";
+import { sqliteTable, text, integer, index } from "drizzle-orm/sqlite-core";
+
+// ====== Better Auth Tables ======
+
+// Users table - managed by Better Auth
+export const user = sqliteTable("user", {
+  id: text("id").primaryKey(),
+  name: text("name"),
+  email: text("email").notNull().unique(),
+  emailVerified: integer("email_verified", { mode: "boolean" }).notNull().default(false),
+  image: text("image"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
+    .notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
+    .notNull(),
+});
+
+// Accounts table - OAuth accounts linked to users
+export const account = sqliteTable("account", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  accountId: text("account_id").notNull(),
+  providerId: text("provider_id").notNull(),
+  accessToken: text("access_token"),
+  refreshToken: text("refresh_token"),
+  accessTokenExpiresAt: integer("access_token_expires_at", { mode: "timestamp_ms" }),
+  refreshTokenExpiresAt: integer("refresh_token_expires_at", { mode: "timestamp_ms" }),
+  scope: text("scope"),
+  idToken: text("id_token"),
+  password: text("password"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
+    .notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
+    .notNull(),
+}, (table) => [index("account_userId_idx").on(table.userId)]);
+
+// Sessions table - active user sessions
+export const session = sqliteTable("session", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  token: text("token").notNull().unique(),
+  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+  ipAddress: text("ip_address"),
+  userAgent: text("user_agent"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
+    .notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
+    .notNull(),
+}, (table) => [index("session_userId_idx").on(table.userId)]);
+
+// Verification table - email verification, password reset, etc.
+export const verification = sqliteTable("verification", {
+  id: text("id").primaryKey(),
+  identifier: text("identifier").notNull(),
+  value: text("value").notNull(),
+  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`),
+}, (table) => [index("verification_identifier_idx").on(table.identifier)]);
+
+// ====== GitTalks Tables ======
 
 // Jobs table - tracks generation requests
 export const jobs = sqliteTable("jobs", {
@@ -80,3 +149,7 @@ export type Episode = typeof episodes.$inferSelect;
 export type NewEpisode = typeof episodes.$inferInsert;
 export type RepoCache = typeof repoCache.$inferSelect;
 export type NewRepoCache = typeof repoCache.$inferInsert;
+// Better Auth type exports
+export type User = typeof user.$inferSelect;
+export type Account = typeof account.$inferSelect;
+export type Session = typeof session.$inferSelect;

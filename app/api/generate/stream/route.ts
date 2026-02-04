@@ -2,16 +2,19 @@
 // POST /api/generate/stream - Start podcast generation with real-time progress
 
 import { NextRequest } from "next/server";
+import { headers } from "next/headers";
 import * as db from "@/lib/db";
 import { initializeDb, type Job, type Playlist, type Episode, type ConversationStyle, type JobStatus } from "@/lib/db";
 import { fetchRepository, parseRepoUrl } from "@/lib/github";
 import { analyzeRepository, generateAllEpisodesContent } from "@/lib/llm";
 import { synthesizeEpisode, saveAudioToStorage } from "@/lib/tts";
+import { auth } from "@/lib/auth";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 export const maxDuration = 300; // 5 minutes max for serverless
 
 interface ProgressEvent {
-  type: "progress" | "step" | "error" | "complete";
+  type: "progress" | "step" | "error" | "complete" | "auth-required" | "rate-limited";
   step: string;
   description: string;
   progress: number; // 0-100
@@ -29,11 +32,64 @@ async function ensureDbInitialized() {
 }
 
 function sendEvent(controller: ReadableStreamDefaultController, event: ProgressEvent) {
-  const data = `data: ${JSON.stringify(event)}\n\n`;
-  controller.enqueue(new TextEncoder().encode(data));
+  try {
+    const data = `data: ${JSON.stringify(event)}\n\n`;
+    controller.enqueue(new TextEncoder().encode(data));
+    return true; // Successfully sent
+  } catch (error) {
+    // Controller may be closed (client disconnected), log but don't throw
+    console.warn("Failed to send event (controller may be closed):", event.type, event.step);
+    return false; // Failed to send
+  }
+}
+
+// Safe close helper
+function safeClose(controller: ReadableStreamDefaultController) {
+  try {
+    controller.close();
+  } catch {
+    // Already closed
+  }
 }
 
 export async function POST(request: NextRequest) {
+  // Check authentication
+  const session = await auth.api.getSession({
+    headers: await headers(),
+  });
+
+  if (!session?.user) {
+    return new Response(
+      JSON.stringify({ 
+        error: "Authentication required",
+        type: "auth-required",
+        message: "Please sign in with GitHub to generate podcasts",
+      }), 
+      {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+
+  // Check rate limit
+  const rateLimitResult = await checkRateLimit(session.user.id);
+  if (!rateLimitResult.allowed) {
+    return new Response(
+      JSON.stringify({
+        error: "Rate limit exceeded",
+        type: "rate-limited",
+        message: rateLimitResult.message,
+        remaining: rateLimitResult.remaining,
+        resetAt: rateLimitResult.resetAt.toISOString(),
+      }),
+      {
+        status: 429,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+
   const body = await request.json();
   const { repoUrl, conversationStyle = "duo" } = body as {
     repoUrl?: string;
@@ -55,8 +111,13 @@ export async function POST(request: NextRequest) {
     });
   }
 
+  // Use authenticated user ID for job creation
+  const userId = session.user.id;
+
   const stream = new ReadableStream({
     async start(controller) {
+      let jobId: string | null = null; // Track job for error cleanup
+      
       try {
         await ensureDbInitialized();
         
@@ -82,7 +143,7 @@ export async function POST(request: NextRequest) {
             description: (error as Error).message,
             progress: 0,
           });
-          controller.close();
+          safeClose(controller);
           return;
         }
 
@@ -97,7 +158,11 @@ export async function POST(request: NextRequest) {
         const existingPlaylist = await db.getPlaylistByRepo(owner, name);
         if (existingPlaylist) {
           const existingEpisodes = await db.getEpisodesByPlaylist(existingPlaylist.id);
-          if (existingEpisodes.length > 0 && existingEpisodes[0].audioUrl) {
+          // Check if ALL episodes have audio (complete generation)
+          const allEpisodesHaveAudio = existingEpisodes.length > 0 && 
+            existingEpisodes.every(ep => ep.audioUrl);
+          
+          if (allEpisodesHaveAudio) {
             // Return existing playlist
             sendEvent(controller, {
               type: "complete",
@@ -109,15 +174,15 @@ export async function POST(request: NextRequest) {
                 episodes: existingEpisodes,
               },
             });
-            controller.close();
+            safeClose(controller);
             return;
           }
+          // If playlist exists but incomplete, we'll regenerate below
         }
 
-        // Create job
-        const userId = "anonymous";
+        // Create job using authenticated user ID
         const job = await db.createJob(repoUrl, owner, name, userId, conversationStyle);
-        const jobId = job.id;
+        jobId = job.id; // Track for error cleanup
 
         // STEP 1: Fetch repository (10%)
         sendEvent(controller, {
@@ -297,16 +362,27 @@ export async function POST(request: NextRequest) {
           },
         });
 
-        controller.close();
+        safeClose(controller);
       } catch (error) {
         console.error("Stream generate error:", error);
+        
+        // Mark job as failed if we have a jobId
+        if (jobId) {
+          try {
+            await db.updateJobStatus(jobId, "failed", "error", (error as Error).message);
+            console.log(`[Job ${jobId}] Marked as failed:`, (error as Error).message);
+          } catch (cleanupError) {
+            console.error("Failed to mark job as failed:", cleanupError);
+          }
+        }
+        
         sendEvent(controller, {
           type: "error",
           step: "error",
           description: (error as Error).message,
           progress: 0,
         });
-        controller.close();
+        safeClose(controller);
       }
     },
   });
