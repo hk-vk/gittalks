@@ -1,6 +1,7 @@
 // GitTalks - TTS Integration
 // Uses DeepInfra Kokoro TTS via OpenAI-compatible API (fast, high-quality)
 // Or Edge TTS (free fallback)
+// Includes text chunking for long scripts and proper MP3 combining with Xing headers
 
 import type {
   TTSSynthesizeResult,
@@ -9,6 +10,7 @@ import type {
   ConversationStyle,
 } from "./types";
 import { uploadAudio } from "./storage";
+import { combineMP3ChunksWithXingHeader, calculateMP3Duration } from "./mp3-utils";
 
 // Check which TTS engine to use
 const USE_KOKORO = !!process.env.DEEPINFRA_API_KEY;
@@ -74,6 +76,65 @@ function estimateDuration(text: string): number {
   return (wordCount / 150) * 60; // ~150 words per minute
 }
 
+// Maximum characters per chunk for Kokoro TTS
+// The API has a limit, we use ~3000 to be safe and allow for natural sentence breaks
+const MAX_CHUNK_CHARS = 3000;
+
+/**
+ * Split text into chunks at sentence boundaries
+ * This ensures long scripts are properly synthesized without truncation
+ */
+function splitTextIntoChunks(text: string, maxChars: number = MAX_CHUNK_CHARS): string[] {
+  // If text is short enough, return as-is
+  if (text.length <= maxChars) {
+    return [text];
+  }
+
+  const chunks: string[] = [];
+  let currentChunk = "";
+
+  // Split by sentences (., !, ?, followed by space or end)
+  const sentences = text.match(/[^.!?]+[.!?]+\s*/g) || [text];
+
+  for (const sentence of sentences) {
+    // If adding this sentence would exceed limit
+    if (currentChunk.length + sentence.length > maxChars) {
+      // Save current chunk if not empty
+      if (currentChunk.trim()) {
+        chunks.push(currentChunk.trim());
+      }
+      
+      // If single sentence is too long, split by words
+      if (sentence.length > maxChars) {
+        const words = sentence.split(/\s+/);
+        currentChunk = "";
+        for (const word of words) {
+          if (currentChunk.length + word.length + 1 > maxChars) {
+            if (currentChunk.trim()) {
+              chunks.push(currentChunk.trim());
+            }
+            currentChunk = word + " ";
+          } else {
+            currentChunk += word + " ";
+          }
+        }
+      } else {
+        currentChunk = sentence;
+      }
+    } else {
+      currentChunk += sentence;
+    }
+  }
+
+  // Don't forget the last chunk
+  if (currentChunk.trim()) {
+    chunks.push(currentChunk.trim());
+  }
+
+  console.log(`[TTS] Split ${text.length} chars into ${chunks.length} chunks`);
+  return chunks;
+}
+
 // Synthesize using Kokoro via DeepInfra OpenAI-compatible API
 async function synthesizeWithKokoro(
   text: string,
@@ -83,8 +144,65 @@ async function synthesizeWithKokoro(
   const cleanText = cleanTextForTTS(text);
   const speed = parseFloat(process.env.KOKORO_SPEED || "1.0");
 
-  console.log(`[TTS/Kokoro] Synthesizing ${cleanText.length} chars with voice ${voice}`);
+  // Split long text into chunks
+  const chunks = splitTextIntoChunks(cleanText);
+  
+  console.log(`[TTS/Kokoro] Synthesizing ${cleanText.length} chars in ${chunks.length} chunks with voice ${voice}`);
 
+  // If only one chunk, synthesize directly
+  if (chunks.length === 1) {
+    return synthesizeSingleChunk(chunks[0], voice, apiKey, speed);
+  }
+
+  // Multiple chunks - synthesize each and combine with Xing header
+  const audioChunks: ArrayBuffer[] = [];
+  let totalDuration = 0;
+
+  for (let i = 0; i < chunks.length; i++) {
+    console.log(`[TTS/Kokoro] Synthesizing chunk ${i + 1}/${chunks.length} (${chunks[i].length} chars)`);
+    
+    const result = await synthesizeSingleChunk(chunks[i], voice, apiKey, speed);
+    
+    // Convert Buffer to ArrayBuffer (handle both ArrayBuffer and SharedArrayBuffer)
+    const arrayBuffer = result.audioData.buffer.slice(
+      result.audioData.byteOffset,
+      result.audioData.byteOffset + result.audioData.byteLength
+    ) as ArrayBuffer;
+    audioChunks.push(arrayBuffer);
+    totalDuration += result.durationSecs;
+
+    // Small delay between API calls to avoid rate limiting
+    if (i < chunks.length - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
+  // Combine chunks with proper Xing header for seeking
+  console.log(`[TTS/Kokoro] Combining ${audioChunks.length} chunks with Xing header...`);
+  const combinedAudio = combineMP3ChunksWithXingHeader(audioChunks);
+  const audioBuffer = Buffer.from(combinedAudio);
+
+  // Recalculate actual duration from combined audio
+  const actualDuration = calculateMP3Duration(combinedAudio);
+  const finalDuration = actualDuration > 0 ? actualDuration : totalDuration;
+
+  console.log(`[TTS/Kokoro] Combined audio: ${audioBuffer.length} bytes, ${finalDuration.toFixed(1)}s`);
+
+  return {
+    audioData: audioBuffer,
+    durationSecs: finalDuration,
+    format: "mp3",
+    wordTimestamps: [], // OpenAI API doesn't return timestamps
+  };
+}
+
+// Synthesize a single chunk of text
+async function synthesizeSingleChunk(
+  text: string,
+  voice: string,
+  apiKey: string,
+  speed: number
+): Promise<TTSSynthesizeResult> {
   // Use OpenAI-compatible API endpoint which properly returns MP3
   const response = await fetch(DEEPINFRA_OPENAI_URL, {
     method: "POST",
@@ -94,7 +212,7 @@ async function synthesizeWithKokoro(
     },
     body: JSON.stringify({
       model: "hexgrad/Kokoro-82M",
-      input: cleanText,
+      input: text,
       voice: voice,
       response_format: "mp3",
       speed: speed,
@@ -124,19 +242,22 @@ async function synthesizeWithKokoro(
     }
   }
 
-  // Calculate duration from audio size (approximate for MP3)
-  // MP3 at 128kbps = 16KB per second
-  // Kokoro typically uses ~48-64kbps for speech
-  const estimatedBitrate = 48000; // 48kbps typical for speech
-  const durationSecs = (audioBuffer.length * 8) / estimatedBitrate;
+  // Calculate actual duration from MP3 frames
+  const actualDuration = calculateMP3Duration(arrayBuffer);
+  
+  // Fallback: estimate from audio size (MP3 at ~48kbps for speech)
+  const estimatedBitrate = 48000;
+  const estimatedDuration = (audioBuffer.length * 8) / estimatedBitrate;
+  
+  const durationSecs = actualDuration > 0 ? actualDuration : estimatedDuration;
 
-  console.log(`[TTS/Kokoro] Generated ~${durationSecs.toFixed(1)}s MP3 audio`);
+  console.log(`[TTS/Kokoro] Chunk duration: ${durationSecs.toFixed(1)}s`);
 
   return {
     audioData: audioBuffer,
     durationSecs,
     format: "mp3",
-    wordTimestamps: [], // OpenAI API doesn't return timestamps
+    wordTimestamps: [],
   };
 }
 
@@ -201,12 +322,12 @@ export async function synthesizeText(
 }
 
 // Synthesize dialogue for duo mode
-// Each turn is synthesized with the speaker's voice, then combined into one MP3
+// Each turn is synthesized with the speaker's voice, then combined into one MP3 with Xing header
 export async function synthesizeDialogue(
   dialogue: DialogueTurn[],
   pauseBetweenTurnsMs: number = 350
 ): Promise<TTSSynthesizeResult> {
-  const audioChunks: Buffer[] = [];
+  const audioChunks: ArrayBuffer[] = [];
   const allWordTimestamps: WordTimestamp[] = [];
   let currentOffsetTicks = 0;
 
@@ -221,14 +342,12 @@ export async function synthesizeDialogue(
     // Synthesize this turn with the speaker's voice
     const result = await synthesizeText(turn.text, voice);
     
-    // For MP3 concatenation, we need to handle headers properly
-    // First chunk keeps full data, subsequent chunks skip ID3 tag
-    if (i === 0) {
-      audioChunks.push(result.audioData);
-    } else {
-      const chunk = skipMP3Header(result.audioData);
-      audioChunks.push(chunk);
-    }
+    // Convert Buffer to ArrayBuffer for combining (handle both ArrayBuffer and SharedArrayBuffer)
+    const arrayBuffer = result.audioData.buffer.slice(
+      result.audioData.byteOffset,
+      result.audioData.byteOffset + result.audioData.byteLength
+    ) as ArrayBuffer;
+    audioChunks.push(arrayBuffer);
 
     // Adjust word timestamps with current offset
     if (result.wordTimestamps && result.wordTimestamps.length > 0) {
@@ -252,14 +371,19 @@ export async function synthesizeDialogue(
     }
   }
 
-  // Combine MP3 chunks
-  const combinedAudio = Buffer.concat(audioChunks);
-  const totalDurationSecs = currentOffsetTicks / 10_000_000;
+  // Combine MP3 chunks with Xing header for proper seeking
+  console.log(`[TTS] Combining ${audioChunks.length} dialogue turns with Xing header...`);
+  const combinedAudio = combineMP3ChunksWithXingHeader(audioChunks);
+  const audioBuffer = Buffer.from(combinedAudio);
+  
+  // Calculate actual duration from combined audio
+  const actualDuration = calculateMP3Duration(combinedAudio);
+  const totalDurationSecs = actualDuration > 0 ? actualDuration : currentOffsetTicks / 10_000_000;
 
-  console.log(`[TTS] Combined ${dialogue.length} turns into ${combinedAudio.length} bytes, ${totalDurationSecs.toFixed(1)}s`);
+  console.log(`[TTS] Combined ${dialogue.length} turns into ${audioBuffer.length} bytes, ${totalDurationSecs.toFixed(1)}s`);
 
   return {
-    audioData: combinedAudio,
+    audioData: audioBuffer,
     durationSecs: totalDurationSecs,
     format: "mp3",
     wordTimestamps: allWordTimestamps,

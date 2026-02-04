@@ -1,22 +1,22 @@
 "use client";
 
 import Link from "next/link";
-import { useState, useEffect, use, useRef } from "react";
+import { useState, useEffect, use, useRef, useMemo } from "react";
 
 interface Episode {
   id: string;
-  playlist_id: string;
+  playlistId: string;
   title: string;
   description: string | null;
-  episode_number: number;
-  audio_url: string | null;
-  duration_secs: number;
+  episodeNumber: number;
+  audioUrl: string | null;
+  durationSecs: number;
   transcript: string | null;
-  show_notes: string | null;
-  word_timestamps: string | null;
-  is_free: number;
-  conversation_style: string;
-  created_at: string;
+  showNotes: string | null;
+  wordTimestamps: string | null;
+  isFree: number;
+  conversationStyle: string;
+  createdAt: string;
 }
 
 interface Playlist {
@@ -24,9 +24,9 @@ interface Playlist {
   title: string;
   description: string | null;
   owner: string;
-  repo_name: string;
-  repo_url: string;
-  total_duration_secs: number;
+  repoName: string;
+  repoUrl: string;
+  totalDurationSecs: number;
 }
 
 interface WordTimestamp {
@@ -65,6 +65,7 @@ const STEP_ICONS: Record<string, string> = {
 export default function PlayerPage({ params }: { params: Promise<{ owner: string; repo: string }> }) {
   const { owner, repo } = use(params);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const lastAudioUrlRef = useRef<string | null>(null);
   
   // State
   const [status, setStatus] = useState<GenerationStatus>("checking");
@@ -89,20 +90,33 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
     checkPlaylist();
   }, [owner, repo]);
 
+  // Current episode data for use in effects
+  const currentWordTimestamps = episodes[currentEpisode]?.wordTimestamps;
+  const episodesLength = episodes.length;
+
   // Audio time update for transcript sync
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
 
+    let lastLoggedTime = -1;
+
     const handleTimeUpdate = () => {
-      setCurrentTime(audio.currentTime);
+      const newTime = audio.currentTime;
+      
+      // Only log when time changes significantly (avoid spam)
+      if (Math.abs(newTime - lastLoggedTime) > 1) {
+        console.log("timeupdate:", newTime.toFixed(2), "readyState:", audio.readyState);
+        lastLoggedTime = newTime;
+      }
+      
+      setCurrentTime(newTime);
       
       // Update active word based on timestamps
-      const episode = episodes[currentEpisode];
-      if (episode?.word_timestamps) {
+      if (currentWordTimestamps) {
         try {
-          const timestamps: WordTimestamp[] = JSON.parse(episode.word_timestamps);
-          const currentTimeNs = audio.currentTime * 10_000_000;
+          const timestamps: WordTimestamp[] = JSON.parse(currentWordTimestamps);
+          const currentTimeNs = newTime * 10_000_000;
           
           for (let i = timestamps.length - 1; i >= 0; i--) {
             if (timestamps[i].offset <= currentTimeNs) {
@@ -115,37 +129,68 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
     };
 
     const handleLoadedMetadata = () => {
+      console.log("loadedmetadata:", audio.duration.toFixed(2), "src:", audio.src.substring(0, 50));
       setDuration(audio.duration);
+    };
+    
+    const handleSeeking = () => {
+      console.log("seeking event - currentTime:", audio.currentTime.toFixed(2));
+    };
+    
+    const handleSeeked = () => {
+      console.log("seeked event - currentTime:", audio.currentTime.toFixed(2));
     };
 
     const handleEnded = () => {
       setIsPlaying(false);
       // Auto-play next episode
-      if (currentEpisode < episodes.length - 1) {
-        setCurrentEpisode(currentEpisode + 1);
+      if (currentEpisode < episodesLength - 1) {
+        setCurrentEpisode(prev => prev + 1);
       }
     };
 
     audio.addEventListener("timeupdate", handleTimeUpdate);
     audio.addEventListener("loadedmetadata", handleLoadedMetadata);
+    audio.addEventListener("seeking", handleSeeking);
+    audio.addEventListener("seeked", handleSeeked);
     audio.addEventListener("ended", handleEnded);
 
     return () => {
       audio.removeEventListener("timeupdate", handleTimeUpdate);
       audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
+      audio.removeEventListener("seeking", handleSeeking);
+      audio.removeEventListener("seeked", handleSeeked);
       audio.removeEventListener("ended", handleEnded);
     };
-  }, [currentEpisode, episodes]);
+  }, [currentEpisode, currentWordTimestamps, episodesLength]);
 
-  // Auto-play when episode changes
+  // Auto-play when episode changes (only when URL actually changes)
+  const currentAudioUrl = episodes[currentEpisode]?.audioUrl;
+  
   useEffect(() => {
-    if (audioRef.current && episodes[currentEpisode]?.audio_url) {
-      audioRef.current.load();
-      if (isPlaying) {
-        audioRef.current.play();
-      }
+    // Only reload if the URL has actually changed
+    if (audioRef.current && currentAudioUrl && currentAudioUrl !== lastAudioUrlRef.current) {
+      lastAudioUrlRef.current = currentAudioUrl;
+      
+      // Reset duration/time state for new track
+      setCurrentTime(0);
+      setDuration(0);
+      
+      // The audio element's src is bound via JSX, so just wait for it to load
+      const audio = audioRef.current;
+      const handleCanPlay = () => {
+        if (isPlaying) {
+          audio.play().catch(() => setIsPlaying(false));
+        }
+        audio.removeEventListener("canplay", handleCanPlay);
+      };
+      audio.addEventListener("canplay", handleCanPlay);
+      
+      return () => {
+        audio.removeEventListener("canplay", handleCanPlay);
+      };
     }
-  }, [currentEpisode, episodes]);
+  }, [currentAudioUrl, isPlaying]);
 
   async function checkPlaylist() {
     setStatus("checking");
@@ -288,10 +333,38 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
   }
 
   function seekTo(e: React.MouseEvent<HTMLDivElement>) {
-    if (!audioRef.current || !duration) return;
+    const audio = audioRef.current;
+    if (!audio || !duration) {
+      console.log("seekTo: No audio ref or duration", { hasAudio: !!audio, duration });
+      return;
+    }
+    
     const rect = e.currentTarget.getBoundingClientRect();
-    const percent = (e.clientX - rect.left) / rect.width;
-    audioRef.current.currentTime = percent * duration;
+    const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const targetTime = percent * duration;
+    
+    console.log("seekTo:", {
+      percent: percent.toFixed(2),
+      targetTime: targetTime.toFixed(2),
+      duration: duration.toFixed(2),
+      currentSrc: audio.src.substring(0, 80),
+      readyState: audio.readyState,
+      networkState: audio.networkState,
+      wasPlaying: isPlaying
+    });
+    
+    // Set the currentTime
+    audio.currentTime = targetTime;
+    
+    // Also update state immediately for UI responsiveness
+    setCurrentTime(targetTime);
+    
+    // If audio was playing, ensure it continues playing
+    if (isPlaying && audio.paused) {
+      audio.play().catch(err => console.log("Play after seek failed:", err));
+    }
+    
+    console.log("After seek - currentTime:", audio.currentTime.toFixed(2), "paused:", audio.paused);
   }
 
   function formatTime(secs: number): string {
@@ -299,6 +372,16 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
     const seconds = Math.floor(secs % 60);
     return `${mins}:${String(seconds).padStart(2, "0")}`;
   }
+
+  // Convert external audio URL to our proxy URL for proper Range request support
+  // Memoized to prevent unnecessary re-renders
+  const proxyAudioUrl = useMemo(() => {
+    const url = currentAudioUrl;
+    if (!url) return null;
+    
+    // Use the direct URL - with our TTS chunking and Xing headers, seeking should work
+    return url;
+  }, [currentAudioUrl]);
 
   const currentEpisodeData = episodes[currentEpisode];
 
@@ -458,13 +541,15 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
 
   // Player UI
   return (
-    <main className="min-h-screen bg-[#0a0a0a] text-[#e8e8e8]">
-      {/* Hidden audio element */}
-      {currentEpisodeData?.audio_url && (
-        <audio ref={audioRef} preload="metadata">
-          <source src={currentEpisodeData.audio_url} type="audio/mpeg" />
-        </audio>
-      )}
+    <main className="min-h-dvh bg-[#0a0a0a] text-[#e8e8e8]">
+      {/* Audio element - always rendered with dynamic src (matching working player) */}
+      <audio 
+        ref={audioRef} 
+        preload="auto"
+        crossOrigin="anonymous"
+        src={proxyAudioUrl || undefined}
+        className="hidden"
+      />
 
       {/* Navigation */}
       <nav className="fixed top-0 w-full z-50 border-b border-[#1a1a1a] bg-[#0a0a0a]/80 backdrop-blur-xl">
@@ -509,7 +594,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                 <div className="flex items-center gap-3 mb-6">
                   <div className="w-3 h-3 rounded-full bg-[#00ff88]" />
                   <span className="text-xs uppercase tracking-wider text-[#666] font-semibold">
-                    Episode {currentEpisodeData?.episode_number || 1}
+                    Episode {currentEpisodeData?.episodeNumber || 1}
                   </span>
                 </div>
                 
@@ -531,7 +616,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                   </div>
                   <div className="flex justify-between text-xs font-mono text-[#666]">
                     <span>{formatTime(currentTime)}</span>
-                    <span>{formatTime(duration || currentEpisodeData?.duration_secs || 0)}</span>
+                    <span>{formatTime(duration || currentEpisodeData?.durationSecs || 0)}</span>
                   </div>
                 </div>
 
@@ -549,7 +634,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                   
                   <button
                     onClick={togglePlay}
-                    disabled={!currentEpisodeData?.audio_url}
+                    disabled={!currentEpisodeData?.audioUrl}
                     className="w-16 h-16 rounded-full bg-[#00ff88] flex items-center justify-center hover:scale-110 active:scale-95 transition-all text-[#0a0a0a] disabled:opacity-50"
                   >
                     {isPlaying ? (
@@ -590,13 +675,13 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
               )}
 
               {/* Show Notes */}
-              {currentEpisodeData?.show_notes && (
+              {currentEpisodeData?.showNotes && (
                 <div className="p-8 bg-[#111] border border-[#1a1a1a] rounded-2xl animate-fadeInUp" style={{ animationDelay: "0.3s" }}>
                   <h3 className="text-sm uppercase tracking-wider text-[#666] font-semibold mb-6">
                     Show Notes
                   </h3>
                   <div className="prose prose-invert prose-sm max-w-none text-[#aaa]">
-                    <div dangerouslySetInnerHTML={{ __html: currentEpisodeData.show_notes.replace(/\n/g, "<br/>") }} />
+                    <div dangerouslySetInnerHTML={{ __html: currentEpisodeData.showNotes.replace(/\n/g, "<br/>") }} />
                   </div>
                 </div>
               )}
@@ -610,7 +695,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                     Episodes ({episodes.length})
                   </h3>
                   <span className="text-xs text-[#555] font-mono">
-                    {formatTime(playlist?.total_duration_secs || 0)} total
+                    {formatTime(playlist?.totalDurationSecs || 0)} total
                   </span>
                 </div>
                 <div className="space-y-2 max-h-[calc(100vh-200px)] overflow-y-auto">
@@ -631,9 +716,9 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2 mb-1">
                             <span className="text-xs font-mono opacity-60">
-                              {String(episode.episode_number).padStart(2, "0")}
+                              {String(episode.episodeNumber).padStart(2, "0")}
                             </span>
-                            {episode.is_free === 1 && (
+                            {episode.isFree === 1 && (
                               <span className={`text-xs px-1.5 py-0.5 rounded ${
                                 idx === currentEpisode ? "bg-[#0a0a0a]/20" : "bg-[#00ff88]/20 text-[#00ff88]"
                               }`}>
@@ -645,7 +730,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                             {episode.title}
                           </div>
                           <div className={`text-xs font-mono ${idx === currentEpisode ? "opacity-60" : "text-[#666]"}`}>
-                            {formatTime(episode.duration_secs)}
+                            {formatTime(episode.durationSecs)}
                           </div>
                         </div>
                         {idx === currentEpisode && isPlaying && (
