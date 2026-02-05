@@ -123,6 +123,36 @@ export async function getRecentJobs(limit: number = 20): Promise<Job[]> {
     .limit(limit);
 }
 
+// Get the active (in-progress) job for a specific repo
+export async function getActiveJobByRepo(owner: string, repoName: string): Promise<Job | null> {
+  const db = getDb();
+  const result = await db.select().from(jobs)
+    .where(and(
+      eq(jobs.owner, owner),
+      eq(jobs.name, repoName)
+    ))
+    .orderBy(desc(jobs.createdAt))
+    .limit(1);
+  
+  const job = result[0] || null;
+  
+  // Only return if it's actively generating (not completed/failed from a while ago)
+  if (job && (job.status !== "completed" && job.status !== "failed")) {
+    return job;
+  }
+  
+  // Also return recent failed jobs so we can show regenerate option
+  if (job && job.status === "failed") {
+    const updatedAt = new Date(job.updatedAt);
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+    if (updatedAt > fiveMinutesAgo) {
+      return job;
+    }
+  }
+  
+  return null;
+}
+
 // ============================================
 // Playlist Operations
 // ============================================

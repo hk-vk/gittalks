@@ -91,9 +91,10 @@ export async function POST(request: NextRequest) {
   }
 
   const body = await request.json();
-  const { repoUrl, conversationStyle = "duo" } = body as {
+  const { repoUrl, conversationStyle = "duo", regenerate = false } = body as {
     repoUrl?: string;
     conversationStyle?: ConversationStyle;
+    regenerate?: boolean; // If true, reuse existing scripts, only regenerate audio
   };
 
   if (!repoUrl) {
@@ -162,8 +163,8 @@ export async function POST(request: NextRequest) {
           const allEpisodesHaveAudio = existingEpisodes.length > 0 && 
             existingEpisodes.every(ep => ep.audioUrl);
           
-          if (allEpisodesHaveAudio) {
-            // Return existing playlist
+          if (allEpisodesHaveAudio && !regenerate) {
+            // Return existing playlist (only if not regenerating)
             sendEvent(controller, {
               type: "complete",
               step: "cached",
@@ -177,6 +178,150 @@ export async function POST(request: NextRequest) {
             safeClose(controller);
             return;
           }
+          
+          // If regenerate mode and we have existing transcripts, skip to audio generation
+          const episodesWithScripts = existingEpisodes.filter(ep => ep.transcript);
+          if (regenerate && episodesWithScripts.length > 0) {
+            sendEvent(controller, {
+              type: "step",
+              step: "regenerating",
+              description: "Regenerating audio from existing scripts",
+              progress: 50,
+              subStep: `Found ${episodesWithScripts.length} existing scripts, regenerating audio only...`,
+            });
+
+            // Create job for tracking
+            const job = await db.createJob(repoUrl, owner, name, userId, conversationStyle);
+            jobId = job.id;
+            await db.setJobPlaylist(jobId, existingPlaylist.id);
+
+            // Go straight to audio generation using existing transcripts
+            let totalDuration = 0;
+            const totalEpisodes = existingEpisodes.length;
+
+            for (let i = 0; i < totalEpisodes; i++) {
+              const episodeRecord = existingEpisodes[i];
+              const episodeProgress = 55 + ((i / totalEpisodes) * 40);
+
+              if (!episodeRecord.transcript) {
+                console.log(`[Regenerate] Episode ${i + 1} has no transcript, skipping`);
+                continue;
+              }
+
+              sendEvent(controller, {
+                type: "progress",
+                step: "generating-audio",
+                description: "Regenerating audio from scripts",
+                progress: Math.round(episodeProgress),
+                subStep: `Episode ${i + 1}/${totalEpisodes}: "${episodeRecord.title}" - Synthesizing voice...`,
+              });
+
+              // Parse dialogue from transcript if it's duo mode
+              let dialogue: Array<{ speaker: "host_expert" | "host_curious"; speakerName: string; text: string }> | undefined = undefined;
+              let scriptText = episodeRecord.transcript;
+              
+              // Speaker name mapping
+              const speakerNames = {
+                host_expert: "Alex",
+                host_curious: "Sam"
+              };
+              
+              if (conversationStyle === "duo" && episodeRecord.transcript) {
+                try {
+                  // Try to parse as JSON (new format - array of dialogue turns)
+                  const parsed = JSON.parse(episodeRecord.transcript);
+                  if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].speaker && parsed[0].text) {
+                    // Ensure speakerName is set
+                    dialogue = parsed.map((d: { speaker: "host_expert" | "host_curious"; speakerName?: string; text: string }) => ({
+                      speaker: d.speaker,
+                      speakerName: d.speakerName || speakerNames[d.speaker],
+                      text: d.text
+                    }));
+                    // Build script text from dialogue for fallback
+                    scriptText = dialogue.map(d => `${d.speaker}: ${d.text}`).join('\n');
+                    console.log(`[Regenerate] Episode ${i + 1}: Parsed ${dialogue.length} dialogue turns from JSON`);
+                  }
+                } catch {
+                  // If not JSON, try to parse as "Speaker: text" format (legacy)
+                  const lines = episodeRecord.transcript.split('\n').filter((l: string) => l.trim());
+                  const parsedDialogue = lines.map((line: string) => {
+                    const match = line.match(/^(host_expert|host_curious):\s*(.+)$/i);
+                    if (match) {
+                      const speaker = match[1].toLowerCase() as "host_expert" | "host_curious";
+                      return { 
+                        speaker,
+                        speakerName: speakerNames[speaker],
+                        text: match[2].trim() 
+                      };
+                    }
+                    return null;
+                  }).filter(Boolean) as Array<{ speaker: "host_expert" | "host_curious"; speakerName: string; text: string }>;
+                  
+                  if (parsedDialogue.length > 0) {
+                    dialogue = parsedDialogue;
+                    console.log(`[Regenerate] Episode ${i + 1}: Parsed ${dialogue.length} dialogue turns from text`);
+                  }
+                }
+              }
+
+              // Synthesize audio using the parsed dialogue or script text
+              const audioResult = await synthesizeEpisode(
+                scriptText,
+                conversationStyle,
+                dialogue
+              );
+
+              sendEvent(controller, {
+                type: "progress",
+                step: "generating-audio",
+                description: "Regenerating audio from scripts",
+                progress: Math.round(episodeProgress + 15),
+                subStep: `Episode ${i + 1}/${totalEpisodes}: "${episodeRecord.title}" - Uploading audio...`,
+              });
+
+              // Save audio to storage
+              const audioFileName = `${existingPlaylist.id}_episode_${i + 1}`;
+              const audioUrl = await saveAudioToStorage(
+                audioResult.audioData,
+                audioFileName,
+                audioResult.format || "mp3"
+              );
+
+              // Update episode with audio info
+              await db.updateEpisodeAudio(
+                episodeRecord.id,
+                audioUrl,
+                Math.round(audioResult.durationSecs),
+                audioResult.wordTimestamps ? JSON.stringify(audioResult.wordTimestamps) : undefined
+              );
+
+              totalDuration += audioResult.durationSecs;
+            }
+
+            // Update playlist duration
+            await db.updatePlaylistDuration(existingPlaylist.id, Math.round(totalDuration));
+            const updatedPlaylist = await db.getPlaylistById(existingPlaylist.id);
+            const updatedEpisodes = await db.getEpisodesByPlaylist(existingPlaylist.id);
+
+            // Mark job complete
+            await db.updateJobStatus(jobId, "completed", "done");
+
+            // COMPLETE
+            sendEvent(controller, {
+              type: "complete",
+              step: "done",
+              description: "Audio regeneration complete!",
+              progress: 100,
+              data: {
+                job: await db.getJobById(jobId),
+                playlist: updatedPlaylist || existingPlaylist,
+                episodes: updatedEpisodes,
+              },
+            });
+
+            safeClose(controller);
+            return;
+          }
           // If playlist exists but incomplete, we'll regenerate below
         }
 
@@ -185,6 +330,7 @@ export async function POST(request: NextRequest) {
         jobId = job.id; // Track for error cleanup
 
         // STEP 1: Fetch repository (10%)
+        await db.updateJobStatus(jobId, "fetching", "Fetching repository from GitHub");
         sendEvent(controller, {
           type: "step",
           step: "fetching",
@@ -204,6 +350,7 @@ export async function POST(request: NextRequest) {
         });
 
         // STEP 2: Analyze repository (20%)
+        await db.updateJobStatus(jobId, "analyzing", "Analyzing codebase structure");
         sendEvent(controller, {
           type: "step",
           step: "analyzing",
@@ -248,6 +395,7 @@ export async function POST(request: NextRequest) {
         }
 
         // STEP 3: Generate content (30-50%)
+        await db.updateJobStatus(jobId, "generating-content", "Writing podcast scripts");
         sendEvent(controller, {
           type: "step",
           step: "generating-content",
@@ -273,6 +421,7 @@ export async function POST(request: NextRequest) {
         });
 
         // STEP 4: Generate audio (50-95%)
+        await db.updateJobStatus(jobId, "generating-audio", "Converting scripts to audio");
         sendEvent(controller, {
           type: "step",
           step: "generating-audio",
@@ -329,9 +478,14 @@ export async function POST(request: NextRequest) {
           );
 
           // Update episode content
+          // For duo mode, store dialogue as JSON for easy regeneration
+          const transcriptToStore = conversationStyle === "duo" && episodeContent.dialogue
+            ? JSON.stringify(episodeContent.dialogue)
+            : episodeContent.audioScript;
+          
           await db.updateEpisodeContent(
             episodeRecord.id,
-            episodeContent.audioScript,
+            transcriptToStore,
             episodeContent.showNotes
           );
 

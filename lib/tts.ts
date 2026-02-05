@@ -12,6 +12,25 @@ import type {
 import { uploadAudio } from "./storage";
 import { combineMP3ChunksWithXingHeader, calculateMP3Duration } from "./mp3-utils";
 
+// Rate limiting configuration
+const TTS_RATE_LIMIT = {
+  maxRetries: 3,
+  baseDelayMs: 1000,
+  maxDelayMs: 15000,
+  betweenChunksDelayMs: 150, // Delay between chunk synthesis
+  betweenDialogueTurnsDelayMs: 100, // Delay between dialogue turns
+};
+
+// Sleep utility
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Exponential backoff with jitter
+function getTTSRetryDelay(attempt: number): number {
+  const exponentialDelay = TTS_RATE_LIMIT.baseDelayMs * Math.pow(2, attempt);
+  const jitter = Math.random() * 500;
+  return Math.min(exponentialDelay + jitter, TTS_RATE_LIMIT.maxDelayMs);
+}
+
 // Check which TTS engine to use
 const USE_KOKORO = !!process.env.DEEPINFRA_API_KEY;
 
@@ -154,27 +173,91 @@ async function synthesizeWithKokoro(
     return synthesizeSingleChunk(chunks[0], voice, apiKey, speed);
   }
 
-  // Multiple chunks - synthesize each and combine with Xing header
+  // FULLY PARALLEL synthesis - ALL chunks at once for maximum speed
+  console.log(`[TTS/Kokoro] Synthesizing ALL ${chunks.length} chunks SIMULTANEOUSLY`);
+
+  type ChunkResult = { index: number; result: TTSSynthesizeResult };
+
+  // Create all promises at once
+  const allChunkPromises = chunks.map((chunk, index) => {
+    console.log(`[TTS/Kokoro] Starting chunk ${index + 1}/${chunks.length} (${chunk.length} chars)`);
+    return synthesizeSingleChunk(chunk, voice, apiKey, speed)
+      .then(result => ({ index, result }));
+  });
+
+  // Wait for ALL to complete simultaneously
+  let chunkResults: ChunkResult[] = await Promise.all(allChunkPromises);
+
+  // IMPORTANT: Sort by index to ensure correct order
+  chunkResults.sort((a, b) => a.index - b.index);
+
+  // Check for failed chunks (empty audio) and retry them
+  const RETRY_EMPTY_AUDIO = 3;
+  for (let retryAttempt = 0; retryAttempt < RETRY_EMPTY_AUDIO; retryAttempt++) {
+    // Find chunks with empty audio data
+    const failedIndices: number[] = [];
+    for (const { index, result } of chunkResults) {
+      const byteLength = result.audioData?.byteLength || result.audioData?.length || 0;
+      if (byteLength === 0 || result.durationSecs <= 0) {
+        failedIndices.push(index);
+      }
+    }
+
+    if (failedIndices.length === 0) break; // All good!
+
+    console.log(`[TTS/Kokoro] Retry ${retryAttempt + 1}/${RETRY_EMPTY_AUDIO}: ${failedIndices.length} chunks have empty audio: [${failedIndices.map(i => i + 1).join(', ')}]`);
+    
+    // Wait a bit before retrying
+    await sleep(1000 * (retryAttempt + 1));
+
+    // Retry failed chunks in parallel
+    const retryPromises = failedIndices.map(index => {
+      console.log(`[TTS/Kokoro] Retrying chunk ${index + 1}...`);
+      return synthesizeSingleChunk(chunks[index], voice, apiKey, speed)
+        .then(result => ({ index, result }));
+    });
+
+    const retryResults = await Promise.all(retryPromises);
+
+    // Replace failed results with retry results
+    for (const retryResult of retryResults) {
+      const existingIdx = chunkResults.findIndex(c => c.index === retryResult.index);
+      if (existingIdx !== -1) {
+        chunkResults[existingIdx] = retryResult;
+      }
+    }
+  }
+
+  // Re-sort after retries
+  chunkResults.sort((a, b) => a.index - b.index);
+  
+  // Verify all chunks were synthesized
+  if (chunkResults.length !== chunks.length) {
+    console.error(`[TTS/Kokoro] ERROR: Expected ${chunks.length} chunks, got ${chunkResults.length}`);
+    throw new Error(`Missing chunks: expected ${chunks.length}, got ${chunkResults.length}`);
+  }
+
+  // Extract audio in correct order
   const audioChunks: ArrayBuffer[] = [];
   let totalDuration = 0;
 
-  for (let i = 0; i < chunks.length; i++) {
-    console.log(`[TTS/Kokoro] Synthesizing chunk ${i + 1}/${chunks.length} (${chunks[i].length} chars)`);
-    
-    const result = await synthesizeSingleChunk(chunks[i], voice, apiKey, speed);
+  for (const { index, result } of chunkResults) {
+    console.log(`[TTS/Kokoro] Adding chunk ${index + 1}: ${result.durationSecs.toFixed(1)}s`);
     
     // Convert Buffer to ArrayBuffer (handle both ArrayBuffer and SharedArrayBuffer)
     const arrayBuffer = result.audioData.buffer.slice(
       result.audioData.byteOffset,
       result.audioData.byteOffset + result.audioData.byteLength
     ) as ArrayBuffer;
+    
+    // Verify chunk has content
+    if (arrayBuffer.byteLength === 0) {
+      console.error(`[TTS/Kokoro] ERROR: Chunk ${index + 1} has no audio data!`);
+      throw new Error(`Chunk ${index + 1} has no audio data`);
+    }
+    
     audioChunks.push(arrayBuffer);
     totalDuration += result.durationSecs;
-
-    // Small delay between API calls to avoid rate limiting
-    if (i < chunks.length - 1) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
   }
 
   // Combine chunks with proper Xing header for seeking
@@ -196,69 +279,103 @@ async function synthesizeWithKokoro(
   };
 }
 
-// Synthesize a single chunk of text
+// Synthesize a single chunk of text with retry logic
 async function synthesizeSingleChunk(
   text: string,
   voice: string,
   apiKey: string,
   speed: number
 ): Promise<TTSSynthesizeResult> {
-  // Use OpenAI-compatible API endpoint which properly returns MP3
-  const response = await fetch(DEEPINFRA_OPENAI_URL, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "hexgrad/Kokoro-82M",
-      input: text,
-      voice: voice,
-      response_format: "mp3",
-      speed: speed,
-    }),
-  });
+  for (let attempt = 0; attempt < TTS_RATE_LIMIT.maxRetries; attempt++) {
+    try {
+      // Use OpenAI-compatible API endpoint which properly returns MP3
+      const response = await fetch(DEEPINFRA_OPENAI_URL, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "hexgrad/Kokoro-82M",
+          input: text,
+          voice: voice,
+          response_format: "mp3",
+          speed: speed,
+        }),
+      });
 
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Kokoro TTS error: ${response.status} - ${error}`);
-  }
+      // Handle rate limiting
+      if (response.status === 429 || response.status === 503) {
+        const retryAfter = response.headers.get("Retry-After");
+        const delay = retryAfter 
+          ? parseInt(retryAfter) * 1000 
+          : getTTSRetryDelay(attempt);
+        console.log(`[TTS/Kokoro] Rate limited, waiting ${Math.round(delay / 1000)}s (attempt ${attempt + 1}/${TTS_RATE_LIMIT.maxRetries})...`);
+        await sleep(delay);
+        continue;
+      }
 
-  // OpenAI API returns raw audio bytes directly (not JSON)
-  const arrayBuffer = await response.arrayBuffer();
-  const audioBuffer = Buffer.from(arrayBuffer);
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`Kokoro TTS error: ${response.status} - ${error}`);
+      }
 
-  console.log(`[TTS/Kokoro] Received ${audioBuffer.length} bytes MP3 audio`);
+      // OpenAI API returns raw audio bytes directly (not JSON)
+      const arrayBuffer = await response.arrayBuffer();
+      const audioBuffer = Buffer.from(arrayBuffer);
 
-  // Verify it's MP3 by checking magic bytes
-  if (audioBuffer.length > 4) {
-    const firstBytes = audioBuffer.slice(0, 4);
-    if (firstBytes[0] === 0x49 && firstBytes[1] === 0x44 && firstBytes[2] === 0x33) {
-      console.log(`[TTS/Kokoro] Verified: MP3 with ID3 tag`);
-    } else if (firstBytes[0] === 0xFF && (firstBytes[1] & 0xE0) === 0xE0) {
-      console.log(`[TTS/Kokoro] Verified: Raw MP3 frames`);
-    } else {
-      console.log(`[TTS/Kokoro] Warning: Unexpected format, first bytes: ${firstBytes.toString("hex")}`);
+      console.log(`[TTS/Kokoro] Received ${audioBuffer.length} bytes MP3 audio`);
+
+      // Verify it's MP3 by checking magic bytes
+      if (audioBuffer.length > 4) {
+        const firstBytes = audioBuffer.slice(0, 4);
+        if (firstBytes[0] === 0x49 && firstBytes[1] === 0x44 && firstBytes[2] === 0x33) {
+          console.log(`[TTS/Kokoro] Verified: MP3 with ID3 tag`);
+        } else if (firstBytes[0] === 0xFF && (firstBytes[1] & 0xE0) === 0xE0) {
+          console.log(`[TTS/Kokoro] Verified: Raw MP3 frames`);
+        } else {
+          console.log(`[TTS/Kokoro] Warning: Unexpected format, first bytes: ${firstBytes.toString("hex")}`);
+        }
+      }
+
+      // Calculate actual duration from MP3 frames
+      const actualDuration = calculateMP3Duration(arrayBuffer);
+      
+      // Fallback: estimate from audio size (MP3 at ~48kbps for speech)
+      const estimatedBitrate = 48000;
+      const estimatedDuration = (audioBuffer.length * 8) / estimatedBitrate;
+      
+      const durationSecs = actualDuration > 0 ? actualDuration : estimatedDuration;
+
+      console.log(`[TTS/Kokoro] Chunk duration: ${durationSecs.toFixed(1)}s`);
+
+      return {
+        audioData: audioBuffer,
+        durationSecs,
+        format: "mp3",
+        wordTimestamps: [],
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      
+      // Check for rate limit related errors
+      if (errorMessage.includes("429") || errorMessage.toLowerCase().includes("rate") || errorMessage.toLowerCase().includes("quota")) {
+        const delay = getTTSRetryDelay(attempt);
+        console.log(`[TTS/Kokoro] Rate limited, waiting ${Math.round(delay / 1000)}s (attempt ${attempt + 1}/${TTS_RATE_LIMIT.maxRetries})...`);
+        await sleep(delay);
+        continue;
+      }
+      
+      // For other errors, throw after retries
+      if (attempt === TTS_RATE_LIMIT.maxRetries - 1) {
+        throw error;
+      }
+      
+      await sleep(getTTSRetryDelay(attempt));
     }
   }
-
-  // Calculate actual duration from MP3 frames
-  const actualDuration = calculateMP3Duration(arrayBuffer);
   
-  // Fallback: estimate from audio size (MP3 at ~48kbps for speech)
-  const estimatedBitrate = 48000;
-  const estimatedDuration = (audioBuffer.length * 8) / estimatedBitrate;
-  
-  const durationSecs = actualDuration > 0 ? actualDuration : estimatedDuration;
-
-  console.log(`[TTS/Kokoro] Chunk duration: ${durationSecs.toFixed(1)}s`);
-
-  return {
-    audioData: audioBuffer,
-    durationSecs,
-    format: "mp3",
-    wordTimestamps: [],
-  };
+  throw new Error(`TTS synthesis failed after ${TTS_RATE_LIMIT.maxRetries} attempts`);
 }
 
 // Synthesize using Edge TTS (fallback)
@@ -321,32 +438,111 @@ export async function synthesizeText(
   return synthesizeWithEdgeTTS(text, selectedVoice);
 }
 
-// Synthesize dialogue for duo mode
+// Synthesize dialogue for duo mode - FULLY PARALLEL processing
 // Each turn is synthesized with the speaker's voice, then combined into one MP3 with Xing header
 export async function synthesizeDialogue(
   dialogue: DialogueTurn[],
   pauseBetweenTurnsMs: number = 350
 ): Promise<TTSSynthesizeResult> {
+  console.log(`[TTS] Synthesizing ALL ${dialogue.length} dialogue turns SIMULTANEOUSLY`);
+
+  // FULLY PARALLEL synthesis - ALL turns at once for maximum speed
+  type TurnResult = { 
+    index: number; 
+    result: TTSSynthesizeResult;
+    durationTicks: number;
+  };
+
+  // Helper function to synthesize a single turn with validation
+  async function synthesizeTurn(turn: DialogueTurn, index: number): Promise<TurnResult> {
+    const voice = DUO_VOICES[turn.speaker];
+    const result = await synthesizeText(turn.text, voice);
+    return {
+      index,
+      result,
+      durationTicks: result.durationSecs * 10_000_000,
+    };
+  }
+
+  // Create all promises at once
+  const allTurnPromises = dialogue.map((turn, index) => {
+    const voice = DUO_VOICES[turn.speaker];
+    console.log(`[TTS] Starting turn ${index + 1}/${dialogue.length}: ${turn.speaker} with voice ${voice}`);
+    return synthesizeTurn(turn, index);
+  });
+
+  // Wait for ALL to complete simultaneously
+  let turnResults: TurnResult[] = await Promise.all(allTurnPromises);
+
+  // IMPORTANT: Sort by index to ensure correct order
+  turnResults.sort((a, b) => a.index - b.index);
+
+  // Check for failed turns (empty audio) and retry them
+  const RETRY_EMPTY_AUDIO = 3;
+  for (let retryAttempt = 0; retryAttempt < RETRY_EMPTY_AUDIO; retryAttempt++) {
+    // Find turns with empty audio data
+    const failedIndices: number[] = [];
+    for (const { index, result } of turnResults) {
+      const byteLength = result.audioData?.byteLength || result.audioData?.length || 0;
+      if (byteLength === 0 || result.durationSecs <= 0) {
+        failedIndices.push(index);
+      }
+    }
+
+    if (failedIndices.length === 0) break; // All good!
+
+    console.log(`[TTS] Retry ${retryAttempt + 1}/${RETRY_EMPTY_AUDIO}: ${failedIndices.length} turns have empty audio: [${failedIndices.map(i => i + 1).join(', ')}]`);
+    
+    // Wait a bit before retrying
+    await sleep(1000 * (retryAttempt + 1));
+
+    // Retry failed turns in parallel
+    const retryPromises = failedIndices.map(index => {
+      console.log(`[TTS] Retrying turn ${index + 1}...`);
+      return synthesizeTurn(dialogue[index], index);
+    });
+
+    const retryResults = await Promise.all(retryPromises);
+
+    // Replace failed results with retry results
+    for (const retryResult of retryResults) {
+      const existingIdx = turnResults.findIndex(t => t.index === retryResult.index);
+      if (existingIdx !== -1) {
+        turnResults[existingIdx] = retryResult;
+      }
+    }
+  }
+
+  // Re-sort after retries
+  turnResults.sort((a, b) => a.index - b.index);
+  
+  // Verify all turns were synthesized
+  if (turnResults.length !== dialogue.length) {
+    console.error(`[TTS] ERROR: Expected ${dialogue.length} turns, got ${turnResults.length}`);
+    throw new Error(`Missing dialogue turns: expected ${dialogue.length}, got ${turnResults.length}`);
+  }
+
+  // Build audio chunks in correct order
   const audioChunks: ArrayBuffer[] = [];
   const allWordTimestamps: WordTimestamp[] = [];
   let currentOffsetTicks = 0;
+  const pauseTicks = pauseBetweenTurnsMs * 10_000;
 
-  console.log(`[TTS] Synthesizing ${dialogue.length} dialogue turns for duo mode`);
-
-  for (let i = 0; i < dialogue.length; i++) {
-    const turn = dialogue[i];
-    const voice = DUO_VOICES[turn.speaker];
-
-    console.log(`[TTS] Turn ${i + 1}/${dialogue.length}: ${turn.speaker} with voice ${voice}`);
-
-    // Synthesize this turn with the speaker's voice
-    const result = await synthesizeText(turn.text, voice);
+  for (const { index, result, durationTicks } of turnResults) {
+    console.log(`[TTS] Adding turn ${index + 1}: ${result.durationSecs.toFixed(1)}s`);
     
-    // Convert Buffer to ArrayBuffer for combining (handle both ArrayBuffer and SharedArrayBuffer)
+    // Convert Buffer to ArrayBuffer for combining
     const arrayBuffer = result.audioData.buffer.slice(
       result.audioData.byteOffset,
       result.audioData.byteOffset + result.audioData.byteLength
     ) as ArrayBuffer;
+    
+    // Verify chunk has content
+    if (arrayBuffer.byteLength === 0) {
+      console.error(`[TTS] ERROR: Turn ${index + 1} has no audio data!`);
+      throw new Error(`Turn ${index + 1} has no audio data`);
+    }
+    
     audioChunks.push(arrayBuffer);
 
     // Adjust word timestamps with current offset
@@ -361,14 +557,7 @@ export async function synthesizeDialogue(
     }
 
     // Update offset for next turn
-    const turnDurationTicks = result.durationSecs * 10_000_000;
-    const pauseTicks = pauseBetweenTurnsMs * 10_000;
-    currentOffsetTicks += turnDurationTicks + pauseTicks;
-
-    // Small delay to avoid rate limiting
-    if (i < dialogue.length - 1) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
+    currentOffsetTicks += durationTicks + pauseTicks;
   }
 
   // Combine MP3 chunks with Xing header for proper seeking

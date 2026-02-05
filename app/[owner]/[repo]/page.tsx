@@ -93,10 +93,53 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
     setMaxProgress(prev => Math.max(prev, newProgress));
   };
 
+  // Track if WE initiated the generation (vs observing someone else's)
+  const [isOwnGeneration, setIsOwnGeneration] = useState(false);
+
   // Check if playlist exists on mount
   useEffect(() => {
     checkPlaylist();
   }, [owner, repo]);
+
+  // Poll for active job status (shows progress to all viewers)
+  useEffect(() => {
+    // Only poll if we're not the one generating OR if we're in checking/idle status
+    if (isOwnGeneration || status === "completed") return;
+    
+    const pollJobStatus = async () => {
+      try {
+        const response = await fetch(`/api/job/repo/${owner}/${repo}`);
+        if (!response.ok) return;
+        
+        const data = await response.json();
+        
+        if (data.hasActiveJob && data.job) {
+          // Someone is generating this repo!
+          if (data.job.status !== "completed" && data.job.status !== "failed") {
+            setStatus("generating");
+            setProgress(data.job.progress);
+            setProgressStep(data.job.status);
+            setProgressDescription(data.job.currentStep);
+            setProgressSubStep("Generation in progress by another user...");
+          } else if (data.job.status === "failed") {
+            setStatus("incomplete");
+            setError(data.job.errorMessage || "Generation failed");
+          } else if (data.job.status === "completed") {
+            // Refresh the page data to show the completed podcast
+            checkPlaylist();
+          }
+        }
+      } catch {
+        // Ignore polling errors
+      }
+    };
+
+    // Poll immediately and then every 2 seconds
+    pollJobStatus();
+    const interval = setInterval(pollJobStatus, 2000);
+    
+    return () => clearInterval(interval);
+  }, [owner, repo, status, isOwnGeneration]);
 
   // Current episode data for use in effects
   const currentWordTimestamps = episodes[currentEpisode]?.wordTimestamps;
@@ -241,12 +284,15 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
     }
   }
 
-  async function generatePodcast() {
+  // Generate podcast - optionally regenerate from existing scripts
+  async function generatePodcast(regenerate: boolean = false) {
+    setIsOwnGeneration(true); // Mark that we're the ones generating
     setStatus("generating");
     setError(null);
     setProgress(0);
+    setMaxProgress(0); // Reset max progress for new generation
     setProgressStep("starting");
-    setProgressDescription("Initializing...");
+    setProgressDescription(regenerate ? "Regenerating audio..." : "Initializing...");
     setProgressSubStep("");
 
     try {
@@ -256,6 +302,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
         body: JSON.stringify({
           repoUrl: `https://github.com/${owner}/${repo}`,
           conversationStyle,
+          regenerate, // If true, reuse existing scripts, only regenerate audio
         }),
       });
 
@@ -586,7 +633,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
 
               <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
                 <button
-                  onClick={generatePodcast}
+                  onClick={() => generatePodcast(true)}
                   className="flex items-center gap-2 px-4 py-2 bg-[#00ff88] text-[#0a0a0a] rounded-lg font-medium hover:bg-[#00dd77] transition-all text-sm"
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
@@ -645,7 +692,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                 </div>
                 <p className="text-red-400/80 text-sm mb-4">{error}</p>
                 <button
-                  onClick={generatePodcast}
+                  onClick={() => generatePodcast(true)}
                   className="flex items-center gap-2 mx-auto px-4 py-2 bg-[#1a1a1a] border border-red-500/30 rounded-lg hover:border-red-400 hover:text-red-400 transition-all text-sm"
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
@@ -718,7 +765,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
 
                 <div className="space-y-4">
                   <button
-                    onClick={generatePodcast}
+                    onClick={() => generatePodcast()}
                     className="px-8 py-4 bg-[#00ff88] text-[#0a0a0a] rounded-xl font-semibold text-lg hover:bg-[#00dd77] transition-all hover:scale-105 active:scale-95"
                   >
                     Generate Podcast

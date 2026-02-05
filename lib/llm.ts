@@ -16,6 +16,24 @@ import type {
   DialogueTurn,
 } from "./types";
 
+// Rate limiting configuration for LLM calls
+const LLM_RATE_LIMIT = {
+  maxRetries: 3,
+  baseDelayMs: 2000,
+  maxDelayMs: 30000,
+  betweenEpisodesDelayMs: 2000, // 2 second delay between episode generations
+};
+
+// Sleep utility
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Exponential backoff with jitter for LLM rate limits
+function getLLMRetryDelay(attempt: number): number {
+  const exponentialDelay = LLM_RATE_LIMIT.baseDelayMs * Math.pow(2, attempt);
+  const jitter = Math.random() * 1000;
+  return Math.min(exponentialDelay + jitter, LLM_RATE_LIMIT.maxDelayMs);
+}
+
 // Initialize Google AI provider
 function getGoogleProvider() {
   const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
@@ -79,57 +97,91 @@ const DuoEpisodeContentSchema = z.object({
   showNotes: z.string(),
 });
 
-// Get depth settings based on file count
+// Get depth settings based on file count - scaled for substantial episode content
 function getDepthSettings(fileCount: number): DepthSettings {
   if (fileCount < 50) {
+    // Small repos: deep coverage, comprehensive episodes
     return {
       scope: "full",
-      maxFilesToAnalyze: 40,
+      maxFilesToAnalyze: 50,
       episodeDepth: "deep",
-      suggestedEpisodes: { min: 3, max: 6 },
-      fileContentLimit: 4000,
-      depthGuidance: "Deep coverage of entire codebase",
+      suggestedEpisodes: { min: 4, max: 8 },
+      fileContentLimit: 8000,
+      depthGuidance: "Deep, comprehensive coverage of entire codebase. Generate 10-15 minute episodes with rich technical detail.",
     };
   } else if (fileCount < 300) {
+    // Medium repos: focused but thorough
     return {
       scope: "critical",
-      maxFilesToAnalyze: 60,
+      maxFilesToAnalyze: 80,
       episodeDepth: "moderate",
-      suggestedEpisodes: { min: 4, max: 8 },
-      fileContentLimit: 3000,
-      depthGuidance: "Focus on critical paths and core architecture",
+      suggestedEpisodes: { min: 5, max: 10 },
+      fileContentLimit: 6000,
+      depthGuidance: "Thorough coverage of critical paths and core architecture. Generate 10-15 minute episodes with substantial technical depth.",
     };
-  } else {
+  } else if (fileCount < 1000) {
+    // Large repos: key systems focus
     return {
       scope: "sampled",
-      maxFilesToAnalyze: 80,
+      maxFilesToAnalyze: 100,
+      episodeDepth: "focused",
+      suggestedEpisodes: { min: 6, max: 12 },
+      fileContentLimit: 5000,
+      depthGuidance: "Focus on key architectural systems and design patterns. Generate 10-15 minute episodes covering major subsystems.",
+    };
+  } else {
+    // Very large repos: architectural overview with depth
+    return {
+      scope: "sampled",
+      maxFilesToAnalyze: 120,
       episodeDepth: "overview",
-      suggestedEpisodes: { min: 5, max: 10 },
-      fileContentLimit: 2500,
-      depthGuidance: "High-level architecture overview",
+      suggestedEpisodes: { min: 8, max: 15 },
+      fileContentLimit: 4000,
+      depthGuidance: "High-level architecture with deep dives into key components. Generate 10-15 minute episodes for each major system.",
     };
   }
 }
 
-// Build analysis prompt
+// Build analysis prompt with dynamic content based on repo size
 function buildAnalysisPrompt(
   owner: string,
   name: string,
   repoData: FetchRepoOutput,
   depthSettings: DepthSettings
 ): string {
+  const fileCount = repoData.files.length;
+  
+  // Dynamic file overview - show more structure for larger repos
+  const maxFilesToShow = fileCount < 100 ? 100 : fileCount < 500 ? 150 : 200;
   const filesOverview = repoData.files
     .filter((f) => f.type === "file")
-    .slice(0, 100)
+    .slice(0, maxFilesToShow)
     .map((f) => f.path)
     .join("\n");
 
+  // Dynamic file content chunks - analyze more files for larger repos
+  const maxFilesForContent = fileCount < 50 ? 15 : fileCount < 200 ? 20 : fileCount < 500 ? 25 : 30;
   const fileContentsText = repoData.fileContents
-    .slice(0, 10)
+    .slice(0, maxFilesForContent)
     .map((f) => `--- ${f.path} ---\n${f.content.slice(0, depthSettings.fileContentLimit)}`)
     .join("\n\n");
 
-  return `Analyze the GitHub repository ${owner}/${name} and create a podcast episode structure.
+  // Group files by directory for architectural insight
+  const directoryStructure = new Map<string, number>();
+  repoData.files.forEach((f) => {
+    const parts = f.path.split("/");
+    if (parts.length > 1) {
+      const topDir = parts[0];
+      directoryStructure.set(topDir, (directoryStructure.get(topDir) || 0) + 1);
+    }
+  });
+  const dirSummary = Array.from(directoryStructure.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 15)
+    .map(([dir, count]) => `${dir}/ (${count} files)`)
+    .join(", ");
+
+  return `Analyze the GitHub repository ${owner}/${name} and create a comprehensive podcast episode structure.
 
 ## Repository Information
 - Description: ${repoData.description || "No description"}
@@ -139,22 +191,26 @@ function buildAnalysisPrompt(
 - License: ${repoData.license || "Unknown"}
 - Total Files: ${repoData.files.length}
 
-## README
-${repoData.readme?.slice(0, 5000) || "No README available"}
+## Directory Structure Overview
+${dirSummary}
 
-## File Structure (top 100 files)
+## README
+${repoData.readme?.slice(0, 6000) || "No README available"}
+
+## File Structure (top ${maxFilesToShow} files)
 ${filesOverview}
 
-## Key File Contents
+## Key File Contents (${repoData.fileContents.length} files analyzed)
 ${fileContentsText}
 
 ## Analysis Guidelines
 - ${depthSettings.depthGuidance}
 - Create ${depthSettings.suggestedEpisodes.min}-${depthSettings.suggestedEpisodes.max} episodes
-- Each episode should be 8-12 minutes (480-720 seconds)
+- Each episode should be 10-15 minutes (600-900 seconds) of rich technical content
 - Make Episode 1 always free (isFree: true)
 - Focus on architecture and design, not line-by-line code
 - Target audience: intermediate to senior developers
+- Episodes should have substantial depth - explain the WHY and HOW in detail
 
 Create a comprehensive analysis with:
 1. Project classification (type, language, frameworks, purpose)
@@ -170,20 +226,41 @@ export async function analyzeRepository(
 ): Promise<AnalysisOutput> {
   const google = getGoogleProvider();
   const depthSettings = getDepthSettings(repoData.files.length);
+  const prompt = buildAnalysisPrompt(owner, name, repoData, depthSettings);
 
-  const { object } = await generateObject({
-    model: google("gemini-2.0-flash"),
-    schema: AnalysisResponseSchema,
-    prompt: buildAnalysisPrompt(owner, name, repoData, depthSettings),
-    temperature: 0.7,
-  });
+  // Retry logic for rate limiting
+  for (let attempt = 0; attempt < LLM_RATE_LIMIT.maxRetries; attempt++) {
+    try {
+      const { object } = await generateObject({
+        model: google("gemini-2.0-flash"),
+        schema: AnalysisResponseSchema,
+        prompt,
+        temperature: 0.7,
+      });
 
-  return {
-    classification: object.classification as unknown as Classification,
-    episodes: object.episodes as EpisodeOutline[],
-    suggestedTitle: object.suggestedTitle,
-    suggestedDescription: object.suggestedDescription,
-  };
+      return {
+        classification: object.classification as unknown as Classification,
+        episodes: object.episodes as EpisodeOutline[],
+        suggestedTitle: object.suggestedTitle,
+        suggestedDescription: object.suggestedDescription,
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      
+      // Check if rate limited
+      if (errorMessage.includes("429") || errorMessage.toLowerCase().includes("rate") || errorMessage.toLowerCase().includes("quota")) {
+        const delay = getLLMRetryDelay(attempt);
+        console.log(`[LLM] Rate limited on analysis, waiting ${Math.round(delay / 1000)}s (attempt ${attempt + 1}/${LLM_RATE_LIMIT.maxRetries})...`);
+        await sleep(delay);
+        continue;
+      }
+      
+      // For other errors, throw immediately
+      throw error;
+    }
+  }
+  
+  throw new Error(`Failed to analyze repository after ${LLM_RATE_LIMIT.maxRetries} attempts`);
 }
 
 // Single narrator system prompt
@@ -230,19 +307,22 @@ Bad: "# Welcome to **GitTalks**. We'll examine \`config.ts\`:\n- Settings"
 - DESCRIBE what code DOES conceptually
 - Mention file names but explain PURPOSE, not implementation
 
-## Structure Requirements (8-10 minutes per episode)
-1. Hook Opening (~20 seconds): "Welcome to GitTalks..." + key insight
-2. Context Setting (~30 seconds): Where this fits in bigger picture
-3. Main Deep Dives (3-4 sections, 2-3 minutes each)
-4. Practical Takeaways (~30 seconds): What to remember
-5. Forward Look (~20 seconds): "Thanks for listening..." + what's next
+## Structure Requirements (10-15 minutes per episode)
+1. Hook Opening (~30 seconds): "Welcome to GitTalks..." + key insight that hooks the listener
+2. Context Setting (~1 minute): Where this fits in bigger picture, what problem it solves
+3. Main Deep Dives (4-5 sections, 2-3 minutes each): The meat of the episode
+4. Technical Insights (~1 minute): Clever patterns, design decisions, trade-offs
+5. Practical Takeaways (~30 seconds): What to remember and apply
+6. Forward Look (~30 seconds): "Thanks for listening..." + what's next
 
 ## Technical Depth
-- Aim for ~2,000-2,500 words per episode
-- Cover 3-4 architectural concepts in depth
+- Aim for ~3,000-4,000 words per episode (this is CRITICAL for 10-15 minute episodes)
+- Cover 4-5 architectural concepts in depth
 - Include specific file/function names but explain their ROLE
 - Reference how components communicate
 - When referencing code, summarize in plain English
+- Explain trade-offs and alternative approaches considered
+- Connect concepts to real-world usage scenarios
 
 ## Voice & Tone
 - Conversational but knowledgeable
@@ -305,10 +385,12 @@ const DUO_MODE_SYSTEM_PROMPT = `You are creating a TWO-HOST PODCAST conversation
 
 ## TIMING & PACING
 
-- Each turn: 1-4 sentences (30-120 words max)
-- Don't let either host monologue too long (max 4-5 sentences)
-- Total episode: 20-30 dialogue turns (8-12 minutes)
-- Include natural moments ("Oh!", "Interesting...")`;
+- Each turn: 2-5 sentences (40-150 words for depth)
+- Don't let either host monologue too long (max 5-6 sentences)
+- Total episode: 35-50 dialogue turns (10-15 minutes) - THIS IS CRITICAL
+- Include natural moments ("Oh!", "Interesting...", "That's clever...")
+- Build depth progressively - start with overview, dive into specifics
+- Each topic should have 3-4 back-and-forth exchanges before moving on`;
 
 // Generate single episode content
 export async function generateSingleEpisodeContent(
@@ -325,7 +407,12 @@ export async function generateSingleEpisodeContent(
   const relevantFiles = episode.sourceFiles
     .map((path) => repoData.fileContents.find((f) => f.path === path))
     .filter(Boolean)
-    .slice(0, 5);
+    .slice(0, 8);
+    
+  // Also include additional context files from the repo
+  const additionalFiles = repoData.fileContents
+    .filter((f) => !relevantFiles.find((rf) => rf?.path === f.path))
+    .slice(0, 4);
 
   const prompt = `Generate the podcast episode content for:
 
@@ -336,38 +423,62 @@ ${repoData.description || ""}
 - Episode ${episodeNumber} of ${totalEpisodes}
 - Title: ${episode.title}
 - Description: ${episode.description}
-- Target Duration: ${Math.round(episode.estimatedDurationSecs / 60)} minutes
+- Target Duration: ${Math.round(episode.estimatedDurationSecs / 60)} minutes (aim for 10-15 minutes)
 
 ## Project Context
 - Type: ${analysis.classification.type}
 - Primary Language: ${analysis.classification.primaryLanguage}
 - Frameworks: ${analysis.classification.frameworks.join(", ")}
 - Purpose: ${analysis.classification.purpose}
+- Target Audience: ${analysis.classification.targetAudience}
 
-## Relevant Source Files
-${relevantFiles.map((f) => `--- ${f!.path} ---\n${f!.content.slice(0, 2000)}`).join("\n\n")}
+## Main Source Files for This Episode
+${relevantFiles.map((f) => `--- ${f!.path} ---\n${f!.content.slice(0, 4000)}`).join("\n\n")}
+
+## Additional Context Files
+${additionalFiles.map((f) => `--- ${f.path} ---\n${f.content.slice(0, 2000)}`).join("\n\n")}
 
 ## README (excerpt)
-${repoData.readme?.slice(0, 3000) || "No README"}
+${repoData.readme?.slice(0, 5000) || "No README"}
 
-Generate a compelling 8-10 minute podcast episode with:
-1. audioScript: PLAIN TEXT content for TTS (2000-2500 words, NO markdown!)
-2. showNotes: Markdown-formatted notes with key points, links, and references`;
+Generate a compelling 10-15 minute podcast episode with:
+1. audioScript: PLAIN TEXT content for TTS (3000-4000 words, NO markdown!) - THIS IS CRITICAL FOR EPISODE LENGTH
+2. showNotes: Markdown-formatted notes with key points, links, and references
 
-  const { object } = await generateObject({
-    model: google("gemini-2.0-flash"),
-    schema: SingleEpisodeContentSchema,
-    system: SINGLE_NARRATOR_SYSTEM_PROMPT,
-    prompt,
-    temperature: 0.8,
-  });
+IMPORTANT: The episode MUST be 3000-4000 words to achieve proper 10-15 minute duration. Do not generate short content.`;
 
-  return {
-    episodeId: episode.id,
-    title: object.title,
-    audioScript: cleanTextForTTS(object.audioScript),
-    showNotes: object.showNotes,
-  };
+  // Retry logic for rate limiting
+  for (let attempt = 0; attempt < LLM_RATE_LIMIT.maxRetries; attempt++) {
+    try {
+      const { object } = await generateObject({
+        model: google("gemini-2.0-flash"),
+        schema: SingleEpisodeContentSchema,
+        system: SINGLE_NARRATOR_SYSTEM_PROMPT,
+        prompt,
+        temperature: 0.8,
+      });
+
+      return {
+        episodeId: episode.id,
+        title: object.title,
+        audioScript: cleanTextForTTS(object.audioScript),
+        showNotes: object.showNotes,
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      
+      if (errorMessage.includes("429") || errorMessage.toLowerCase().includes("rate") || errorMessage.toLowerCase().includes("quota")) {
+        const delay = getLLMRetryDelay(attempt);
+        console.log(`[LLM] Rate limited on episode ${episodeNumber}, waiting ${Math.round(delay / 1000)}s (attempt ${attempt + 1}/${LLM_RATE_LIMIT.maxRetries})...`);
+        await sleep(delay);
+        continue;
+      }
+      
+      throw error;
+    }
+  }
+  
+  throw new Error(`Failed to generate episode ${episodeNumber} after ${LLM_RATE_LIMIT.maxRetries} attempts`);
 }
 
 // Generate duo episode content
@@ -385,7 +496,12 @@ export async function generateDuoEpisodeContent(
   const relevantFiles = episode.sourceFiles
     .map((path) => repoData.fileContents.find((f) => f.path === path))
     .filter(Boolean)
-    .slice(0, 5);
+    .slice(0, 8);
+    
+  // Also include additional context files from the repo
+  const additionalFiles = repoData.fileContents
+    .filter((f) => !relevantFiles.find((rf) => rf?.path === f.path))
+    .slice(0, 4);
 
   const prompt = `Generate a TWO-HOST podcast conversation for:
 
@@ -396,48 +512,73 @@ ${repoData.description || ""}
 - Episode ${episodeNumber} of ${totalEpisodes}
 - Title: ${episode.title}
 - Description: ${episode.description}
-- Target Duration: ${Math.round(episode.estimatedDurationSecs / 60)} minutes
+- Target Duration: ${Math.round(episode.estimatedDurationSecs / 60)} minutes (aim for 10-15 minutes)
 
 ## Project Context
 - Type: ${analysis.classification.type}
 - Primary Language: ${analysis.classification.primaryLanguage}
 - Frameworks: ${analysis.classification.frameworks.join(", ")}
 - Purpose: ${analysis.classification.purpose}
+- Target Audience: ${analysis.classification.targetAudience}
 
-## Relevant Source Files
-${relevantFiles.map((f) => `--- ${f!.path} ---\n${f!.content.slice(0, 2000)}`).join("\n\n")}
+## Main Source Files for This Episode
+${relevantFiles.map((f) => `--- ${f!.path} ---\n${f!.content.slice(0, 4000)}`).join("\n\n")}
+
+## Additional Context Files
+${additionalFiles.map((f) => `--- ${f.path} ---\n${f.content.slice(0, 2000)}`).join("\n\n")}
 
 ## README (excerpt)
-${repoData.readme?.slice(0, 3000) || "No README"}
+${repoData.readme?.slice(0, 5000) || "No README"}
 
 Generate an engaging conversation between Alex (expert) and Jordan (curious learner) with:
-1. 20-30 dialogue turns
-2. Natural conversational flow
-3. showNotes with key points discussed`;
+1. 35-50 dialogue turns - THIS IS CRITICAL for proper episode length (10-15 minutes)
+2. Natural conversational flow with depth and technical insight
+3. Each turn should be 2-5 sentences for proper pacing
+4. showNotes with key points discussed
 
-  const { object } = await generateObject({
-    model: google("gemini-2.0-flash"),
-    schema: DuoEpisodeContentSchema,
-    system: DUO_MODE_SYSTEM_PROMPT,
-    prompt,
-    temperature: 0.85,
-  });
+IMPORTANT: Generate AT LEAST 35 dialogue turns to achieve proper 10-15 minute duration.`;
 
-  // Convert dialogue to audio script
-  const audioScript = object.dialogue
-    .map((turn) => `${turn.speakerName}: ${turn.text}`)
-    .join("\n\n");
+  // Retry logic for rate limiting
+  for (let attempt = 0; attempt < LLM_RATE_LIMIT.maxRetries; attempt++) {
+    try {
+      const { object } = await generateObject({
+        model: google("gemini-2.0-flash"),
+        schema: DuoEpisodeContentSchema,
+        system: DUO_MODE_SYSTEM_PROMPT,
+        prompt,
+        temperature: 0.85,
+      });
 
-  return {
-    episodeId: episode.id,
-    title: object.title,
-    audioScript: cleanTextForTTS(audioScript),
-    showNotes: object.showNotes,
-    dialogue: object.dialogue as DialogueTurn[],
-  };
+      // Convert dialogue to audio script
+      const audioScript = object.dialogue
+        .map((turn) => `${turn.speakerName}: ${turn.text}`)
+        .join("\n\n");
+
+      return {
+        episodeId: episode.id,
+        title: object.title,
+        audioScript: cleanTextForTTS(audioScript),
+        showNotes: object.showNotes,
+        dialogue: object.dialogue as DialogueTurn[],
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      
+      if (errorMessage.includes("429") || errorMessage.toLowerCase().includes("rate") || errorMessage.toLowerCase().includes("quota")) {
+        const delay = getLLMRetryDelay(attempt);
+        console.log(`[LLM] Rate limited on duo episode ${episodeNumber}, waiting ${Math.round(delay / 1000)}s (attempt ${attempt + 1}/${LLM_RATE_LIMIT.maxRetries})...`);
+        await sleep(delay);
+        continue;
+      }
+      
+      throw error;
+    }
+  }
+  
+  throw new Error(`Failed to generate duo episode ${episodeNumber} after ${LLM_RATE_LIMIT.maxRetries} attempts`);
 }
 
-// Generate all episodes content
+// Generate all episodes content - PARALLEL processing
 export async function generateAllEpisodesContent(
   owner: string,
   name: string,
@@ -445,43 +586,82 @@ export async function generateAllEpisodesContent(
   analysis: AnalysisOutput,
   conversationStyle: ConversationStyle
 ): Promise<GeneratedContent> {
-  const episodes: EpisodeContent[] = [];
   const totalEpisodes = analysis.episodes.length;
+  
+  // PARALLEL episode generation - process in batches
+  // Using batch size of 3 to avoid overwhelming the LLM API
+  const PARALLEL_BATCH_SIZE = 3;
+  
+  type EpisodeResult = { index: number; content: EpisodeContent };
+  const episodeResults: EpisodeResult[] = [];
 
-  for (let i = 0; i < analysis.episodes.length; i++) {
-    const episode = analysis.episodes[i];
-    const episodeNumber = i + 1;
+  console.log(`[LLM] Generating ${totalEpisodes} episodes in PARALLEL (batch size: ${PARALLEL_BATCH_SIZE})`);
 
-    console.log(`Generating content for episode ${episodeNumber}/${totalEpisodes}: ${episode.title}`);
-
-    const content =
-      conversationStyle === "duo"
-        ? await generateDuoEpisodeContent(
-            owner,
-            name,
-            repoData,
-            episode,
-            episodeNumber,
-            totalEpisodes,
-            analysis
-          )
-        : await generateSingleEpisodeContent(
-            owner,
-            name,
-            repoData,
-            episode,
-            episodeNumber,
-            totalEpisodes,
-            analysis
-          );
-
-    episodes.push(content);
-
-    // Small delay to avoid rate limiting
-    if (i < analysis.episodes.length - 1) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+  for (let batchStart = 0; batchStart < totalEpisodes; batchStart += PARALLEL_BATCH_SIZE) {
+    const batchEnd = Math.min(batchStart + PARALLEL_BATCH_SIZE, totalEpisodes);
+    const batch = analysis.episodes.slice(batchStart, batchEnd);
+    
+    console.log(`[LLM] Parallel batch ${Math.floor(batchStart / PARALLEL_BATCH_SIZE) + 1}: episodes ${batchStart + 1}-${batchEnd} of ${totalEpisodes}`);
+    
+    // Generate batch in parallel
+    const batchPromises = batch.map(async (episode, batchIndex) => {
+      const globalIndex = batchStart + batchIndex;
+      const episodeNumber = globalIndex + 1;
+      
+      console.log(`[LLM] Starting episode ${episodeNumber}/${totalEpisodes}: ${episode.title}`);
+      
+      const content =
+        conversationStyle === "duo"
+          ? await generateDuoEpisodeContent(
+              owner,
+              name,
+              repoData,
+              episode,
+              episodeNumber,
+              totalEpisodes,
+              analysis
+            )
+          : await generateSingleEpisodeContent(
+              owner,
+              name,
+              repoData,
+              episode,
+              episodeNumber,
+              totalEpisodes,
+              analysis
+            );
+      
+      // Log word count for monitoring
+      const wordCount = content.audioScript.split(/\s+/).length;
+      console.log(`[LLM] Episode ${episodeNumber} generated: ${wordCount} words`);
+      
+      return { index: globalIndex, content };
+    });
+    
+    // Wait for all in batch to complete
+    const batchResults = await Promise.all(batchPromises);
+    episodeResults.push(...batchResults);
+    
+    // Delay between batches to prevent rate limiting
+    if (batchEnd < totalEpisodes) {
+      console.log(`[LLM] Waiting ${LLM_RATE_LIMIT.betweenEpisodesDelayMs / 1000}s before next batch...`);
+      await sleep(LLM_RATE_LIMIT.betweenEpisodesDelayMs);
     }
   }
+
+  // Sort by index to ensure correct order
+  episodeResults.sort((a, b) => a.index - b.index);
+  
+  // Verify all episodes were generated
+  if (episodeResults.length !== totalEpisodes) {
+    throw new Error(`Missing episodes: expected ${totalEpisodes}, got ${episodeResults.length}`);
+  }
+
+  // Extract contents in order
+  const episodes = episodeResults.map(({ content }) => content);
+  
+  console.log(`[LLM] All ${totalEpisodes} episodes generated successfully`);
+
 
   return { episodes };
 }
