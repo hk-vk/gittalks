@@ -8,6 +8,54 @@ import { useSession, signIn, signOut } from "@/lib/auth-client";
 // Words for the hero animation
 const WORDS = ["repositories", "repo-stories"];
 
+// Popular repos - stars will be fetched dynamically
+const POPULAR_REPO_CONFIG = [
+  { owner: "github", name: "copilot-cli", description: "GitHub Copilot in the terminal" },
+  { owner: "vercel", name: "next.js", description: "The React Framework for the Web" },
+  { owner: "facebook", name: "react", description: "The library for web and native interfaces" },
+  { owner: "microsoft", name: "vscode", description: "Visual Studio Code" },
+  { owner: "tailwindlabs", name: "tailwindcss", description: "A utility-first CSS framework" },
+];
+
+// Cache key for localStorage
+const STARS_CACHE_KEY = "gittalks_repo_stars";
+const STARS_CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+
+// Format star count (e.g., 137500 -> "137.5k")
+function formatStars(count: number): string {
+  if (count >= 1000) {
+    return `${(count / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+  }
+  return count.toString();
+}
+
+// Get cached stars from localStorage
+function getCachedStars(): { data: Record<string, string>; timestamp: number } | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const cached = localStorage.getItem(STARS_CACHE_KEY);
+    if (cached) {
+      return JSON.parse(cached);
+    }
+  } catch (e) {
+    console.error("Failed to read stars cache:", e);
+  }
+  return null;
+}
+
+// Save stars to localStorage
+function cacheStars(data: Record<string, string>) {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(STARS_CACHE_KEY, JSON.stringify({
+      data,
+      timestamp: Date.now(),
+    }));
+  } catch (e) {
+    console.error("Failed to cache stars:", e);
+  }
+}
+
 export default function HomePage() {
   const router = useRouter();
   const [repoInput, setRepoInput] = useState("");
@@ -16,9 +64,68 @@ export default function HomePage() {
   const { data: session, isPending } = useSession();
   const [wordIndex, setWordIndex] = useState(0);
   const [isTransitioning, setIsTransitioning] = useState(false);
+  
+  // State for dynamically fetched repo data
+  const [popularRepos, setPopularRepos] = useState(
+    POPULAR_REPO_CONFIG.map(r => ({ ...r, stars: "..." }))
+  );
 
   // Current word
   const currentWord = WORDS[wordIndex];
+
+  // Fetch real star counts from GitHub API (with localStorage caching)
+  useEffect(() => {
+    async function fetchStarCounts() {
+      // Check localStorage cache first
+      const cached = getCachedStars();
+      if (cached && Date.now() - cached.timestamp < STARS_CACHE_DURATION) {
+        // Use cached data
+        const cachedRepos = POPULAR_REPO_CONFIG.map(repo => ({
+          ...repo,
+          stars: cached.data[`${repo.owner}/${repo.name}`] || "★"
+        }));
+        setPopularRepos(cachedRepos);
+        console.log("[Stars] Using cached data (less than 24h old)");
+        return;
+      }
+
+      console.log("[Stars] Fetching fresh data from GitHub API...");
+      
+      const starsMap: Record<string, string> = {};
+      
+      const updatedRepos = await Promise.all(
+        POPULAR_REPO_CONFIG.map(async (repo) => {
+          const repoKey = `${repo.owner}/${repo.name}`;
+          try {
+            const response = await fetch(
+              `https://api.github.com/repos/${repo.owner}/${repo.name}`,
+              {
+                headers: {
+                  "Accept": "application/vnd.github.v3+json",
+                },
+              }
+            );
+            if (response.ok) {
+              const data = await response.json();
+              const stars = formatStars(data.stargazers_count);
+              starsMap[repoKey] = stars;
+              return { ...repo, stars };
+            }
+          } catch (error) {
+            console.error(`Failed to fetch stars for ${repoKey}:`, error);
+          }
+          starsMap[repoKey] = "★";
+          return { ...repo, stars: "★" }; // Fallback
+        })
+      );
+      
+      // Cache the results
+      cacheStars(starsMap);
+      setPopularRepos(updatedRepos);
+    }
+    
+    fetchStarCounts();
+  }, []);
 
   // Clean slide transition
   useEffect(() => {
@@ -40,14 +147,6 @@ export default function HomePage() {
 
     return () => clearInterval(interval);
   }, []);
-
-  const popularRepos = [
-    { owner: "github", name: "copilot-cli", stars: "10k", description: "GitHub Copilot in the terminal" },
-    { owner: "vercel", name: "next.js", stars: "120k", description: "The React Framework for the Web" },
-    { owner: "facebook", name: "react", stars: "220k", description: "The library for web and native interfaces" },
-    { owner: "microsoft", name: "vscode", stars: "158k", description: "Visual Studio Code" },
-    { owner: "tailwindlabs", name: "tailwindcss", stars: "78k", description: "A utility-first CSS framework" },
-  ];
 
   function parseRepoInput(input: string): { owner: string; name: string } | null {
     // Handle full URL
@@ -244,26 +343,50 @@ export default function HomePage() {
                 type="text"
                 value={repoInput}
                 onChange={(e) => setRepoInput(e.target.value)}
-                placeholder="Enter repository URL or owner/repo"
-                className="w-full px-4 sm:px-8 py-4 sm:py-6 bg-[#111] border-2 border-[#1a1a1a] rounded-xl sm:rounded-2xl text-base sm:text-lg focus:outline-none focus:border-[#00ff88] transition-all placeholder:text-[#444] font-mono text-xs sm:text-sm"
+                placeholder="github.com/owner/repo"
+                className="w-full px-5 sm:px-6 py-4 sm:py-5 bg-zinc-950 border border-zinc-800 rounded-lg text-base focus:outline-none focus:border-emerald-500 transition-colors placeholder:text-zinc-600 font-mono tracking-tight"
               />
               <button
                 type="submit"
                 disabled={isLoading || !repoInput.trim()}
-                className="sm:absolute sm:right-3 sm:top-1/2 sm:-translate-y-1/2 w-full sm:w-auto px-6 py-3 sm:py-3 bg-white text-[#0a0a0a] font-bold text-sm uppercase tracking-widest border-2 border-white shadow-[4px_4px_0px_0px_rgba(255,255,255,0.4)] hover:shadow-[4px_4px_0px_0px_rgba(255,255,255,0.7)] active:shadow-none transition-shadow duration-150 disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
+                className={`
+                  sm:absolute sm:right-1.5 sm:top-1/2 sm:-translate-y-1/2 
+                  group
+                  flex items-center justify-center gap-2.5
+                  px-4 py-2.5
+                  rounded-md
+                  border
+                  font-mono text-xs uppercase tracking-[0.2em]
+                  transition-all duration-150
+                  ${isLoading 
+                    ? 'bg-emerald-500 border-emerald-500 text-zinc-950'
+                    : repoInput.trim()
+                      ? 'bg-emerald-500/10 border-emerald-500/50 text-emerald-400 hover:bg-emerald-500 hover:border-emerald-500 hover:text-zinc-950'
+                      : 'bg-transparent border-zinc-800/50 text-zinc-700 cursor-not-allowed opacity-50'
+                  }
+                `}
               >
                 {isLoading ? (
-                  <span className="flex items-center justify-center gap-2">
-                    <span className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
-                    LOADING
-                  </span>
+                  <>
+                    <span className="size-3.5 border-2 border-zinc-950/30 border-t-zinc-950 rounded-full animate-spin" />
+                    <span>Processing</span>
+                  </>
                 ) : (
-                  "GENERATE →"
+                  <>
+                    <svg 
+                      className={`size-3.5 transition-transform duration-150 ${repoInput.trim() ? 'group-hover:scale-110' : ''}`} 
+                      viewBox="0 0 24 24" 
+                      fill="currentColor"
+                    >
+                      <path d="M6.5 5.5v13l11-6.5z" />
+                    </svg>
+                    <span>{repoInput.trim() ? 'Generate' : 'Waiting'}</span>
+                  </>
                 )}
               </button>
             </form>
             
-            {/* Quick Select Options */}
+            {/* Quick Select Options - Direct Navigation */}
             <div className="mt-4 flex flex-wrap items-center gap-2">
               <span className="text-xs text-[#666]">Try:</span>
               {[
@@ -271,14 +394,13 @@ export default function HomePage() {
                 { owner: "vercel", name: "next.js" },
                 { owner: "facebook", name: "react" },
               ].map((repo) => (
-                <button
+                <Link
                   key={`${repo.owner}/${repo.name}`}
-                  type="button"
-                  onClick={() => setRepoInput(`${repo.owner}/${repo.name}`)}
+                  href={`/${repo.owner}/${repo.name}`}
                   className="px-3 py-1.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded-full text-xs font-mono text-[#888] hover:border-[#00ff88] hover:text-[#00ff88] transition-all"
                 >
                   {repo.owner}/{repo.name}
-                </button>
+                </Link>
               ))}
             </div>
           </div>
