@@ -36,6 +36,12 @@ interface WordTimestamp {
   text: string;
 }
 
+interface DialogueLine {
+  speaker: "host_curious" | "host_expert";
+  speakerName: string;
+  text: string;
+}
+
 interface ProgressEvent {
   type: "progress" | "step" | "error" | "complete";
   step: string;
@@ -63,11 +69,72 @@ const STEP_LABELS: Record<string, string> = {
   cached: "Cached",
 };
 
+// Transcript Display Component
+function TranscriptDisplay({ transcript, conversationStyle }: { transcript: string; conversationStyle: string }) {
+  // Try to parse as duo mode dialogue (JSON array)
+  let dialogueLines: DialogueLine[] | null = null;
+
+  if (conversationStyle === "duo") {
+    try {
+      const parsed = JSON.parse(transcript);
+      if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].speaker && parsed[0].text) {
+        dialogueLines = parsed;
+      }
+    } catch (e) {
+      // Not JSON, treat as plain text
+    }
+  }
+
+  if (dialogueLines) {
+    // Render duo mode dialogue with speakers
+    return (
+      <div className="space-y-3">
+        {dialogueLines.map((line, idx) => (
+          <div
+            key={idx}
+            className={`p-4 rounded-xl border ${line.speaker === "host_curious"
+              ? "bg-[#1a1a1a] border-[#2a2a2a]"
+              : "bg-[#111] border-[#1a1a1a]"
+              }`}
+          >
+            <div className="flex items-start gap-3">
+              <div
+                className={`flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-xs font-semibold text-[#111] ${line.speaker === "host_curious"
+                  ? "bg-[#00ff88]"
+                  : "bg-[#888]"
+                  }`}
+              >
+                {line.speakerName.charAt(0)}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div
+                  className={`text-xs font-semibold mb-1 ${line.speaker === "host_curious" ? "text-[#00ff88]" : "text-[#999]"
+                    }`}
+                >
+                  {line.speakerName}
+                </div>
+                <p className="text-[#aaa] text-sm leading-relaxed">{line.text}</p>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  // Render plain text transcript
+  return (
+    <p className="text-[#aaa] text-sm leading-relaxed whitespace-pre-wrap">
+      {transcript}
+    </p>
+  );
+}
+
 export default function PlayerPage({ params }: { params: Promise<{ owner: string; repo: string }> }) {
   const { owner, repo } = use(params);
   const audioRef = useRef<HTMLAudioElement>(null);
   const lastAudioUrlRef = useRef<string | null>(null);
-  
+
   // State
   const [status, setStatus] = useState<GenerationStatus>("checking");
   const [error, setError] = useState<string | null>(null);
@@ -79,14 +146,14 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
   const [duration, setDuration] = useState(0);
   const [activeWord, setActiveWord] = useState<string>("");
   const [conversationStyle, setConversationStyle] = useState<"single" | "duo">("duo");
-  
+
   // Progress state - use maxProgress to prevent bar from going backwards
   const [progress, setProgressRaw] = useState(0);
   const [maxProgress, setMaxProgress] = useState(0);
   const [progressStep, setProgressStep] = useState("");
   const [progressDescription, setProgressDescription] = useState("");
   const [progressSubStep, setProgressSubStep] = useState("");
-  
+
   // Custom setProgress that only allows forward movement
   const setProgress = (newProgress: number) => {
     setProgressRaw(newProgress);
@@ -105,14 +172,14 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
   useEffect(() => {
     // Only poll if we're not the one generating OR if we're in checking/idle status
     if (isOwnGeneration || status === "completed") return;
-    
+
     const pollJobStatus = async () => {
       try {
         const response = await fetch(`/api/job/repo/${owner}/${repo}`);
         if (!response.ok) return;
-        
+
         const data = await response.json();
-        
+
         if (data.hasActiveJob && data.job) {
           // Someone is generating this repo!
           if (data.job.status !== "completed" && data.job.status !== "failed") {
@@ -137,7 +204,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
     // Poll immediately and then every 2 seconds
     pollJobStatus();
     const interval = setInterval(pollJobStatus, 2000);
-    
+
     return () => clearInterval(interval);
   }, [owner, repo, status, isOwnGeneration]);
 
@@ -154,28 +221,28 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
 
     const handleTimeUpdate = () => {
       const newTime = audio.currentTime;
-      
+
       // Only log when time changes significantly (avoid spam)
       if (Math.abs(newTime - lastLoggedTime) > 1) {
         console.log("timeupdate:", newTime.toFixed(2), "readyState:", audio.readyState);
         lastLoggedTime = newTime;
       }
-      
+
       setCurrentTime(newTime);
-      
+
       // Update active word based on timestamps
       if (currentWordTimestamps) {
         try {
           const timestamps: WordTimestamp[] = JSON.parse(currentWordTimestamps);
           const currentTimeNs = newTime * 10_000_000;
-          
+
           for (let i = timestamps.length - 1; i >= 0; i--) {
             if (timestamps[i].offset <= currentTimeNs) {
               setActiveWord(timestamps[i].text);
               break;
             }
           }
-        } catch {}
+        } catch { }
       }
     };
 
@@ -183,11 +250,11 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
       console.log("loadedmetadata:", audio.duration.toFixed(2), "src:", audio.src.substring(0, 50));
       setDuration(audio.duration);
     };
-    
+
     const handleSeeking = () => {
       console.log("seeking event - currentTime:", audio.currentTime.toFixed(2));
     };
-    
+
     const handleSeeked = () => {
       console.log("seeked event - currentTime:", audio.currentTime.toFixed(2));
     };
@@ -217,16 +284,16 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
 
   // Auto-play when episode changes (only when URL actually changes)
   const currentAudioUrl = episodes[currentEpisode]?.audioUrl;
-  
+
   useEffect(() => {
     // Only reload if the URL has actually changed
     if (audioRef.current && currentAudioUrl && currentAudioUrl !== lastAudioUrlRef.current) {
       lastAudioUrlRef.current = currentAudioUrl;
-      
+
       // Reset duration/time state for new track
       setCurrentTime(0);
       setDuration(0);
-      
+
       // The audio element's src is bound via JSX, so just wait for it to load
       const audio = audioRef.current;
       const handleCanPlay = () => {
@@ -236,7 +303,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
         audio.removeEventListener("canplay", handleCanPlay);
       };
       audio.addEventListener("canplay", handleCanPlay);
-      
+
       return () => {
         audio.removeEventListener("canplay", handleCanPlay);
       };
@@ -252,11 +319,11 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
       if (data.exists && data.playlist && data.episodes?.length > 0) {
         setPlaylist(data.playlist);
         setEpisodes(data.episodes);
-        
+
         // Calculate how many episodes are missing
         const totalEpisodes = data.totalEpisodes || data.episodes.length;
         const missingCount = totalEpisodes - data.episodes.length;
-        
+
         // Only show incomplete warning if more than 2 episodes are missing
         // AND if less than 70% of episodes are ready
         // This means: 7/8 ready (1 missing) = play directly
@@ -264,7 +331,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
         //             5/8 ready (3 missing) = show warning
         const completionRatio = data.episodes.length / totalEpisodes;
         const showWarning = missingCount > 2 && completionRatio < 0.7;
-        
+
         if (data.hasIncompleteEpisodes && showWarning) {
           setStatus("incomplete");
           setError(`Generation incomplete: ${data.episodes.length}/${totalEpisodes} episodes ready`);
@@ -308,21 +375,21 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
 
       if (!response.ok) {
         const data = await response.json();
-        
+
         // Handle auth required
         if (response.status === 401 && data.type === "auth-required") {
           setStatus("auth-required");
           setError("Sign in to generate podcasts");
           return;
         }
-        
+
         // Handle rate limit
         if (response.status === 429 && data.type === "rate-limited") {
           setStatus("rate-limited");
           setError(data.error || "Rate limit exceeded");
           return;
         }
-        
+
         throw new Error(data.error || "Generation failed");
       }
 
@@ -337,20 +404,20 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
 
       while (true) {
         const { done, value } = await reader.read();
-        
+
         if (done) break;
-        
+
         buffer += decoder.decode(value, { stream: true });
-        
+
         // Process complete events
         const lines = buffer.split("\n\n");
         buffer = lines.pop() || ""; // Keep incomplete data in buffer
-        
+
         for (const line of lines) {
           if (line.startsWith("data: ")) {
             try {
               const event: ProgressEvent = JSON.parse(line.slice(6));
-              
+
               setProgress(event.progress);
               setProgressStep(event.step);
               setProgressDescription(event.description);
@@ -431,11 +498,11 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
       console.log("seekTo: No audio ref or duration", { hasAudio: !!audio, duration });
       return;
     }
-    
+
     const rect = e.currentTarget.getBoundingClientRect();
     const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     const targetTime = percent * duration;
-    
+
     console.log("seekTo:", {
       percent: percent.toFixed(2),
       targetTime: targetTime.toFixed(2),
@@ -445,18 +512,18 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
       networkState: audio.networkState,
       wasPlaying: isPlaying
     });
-    
+
     // Set the currentTime
     audio.currentTime = targetTime;
-    
+
     // Also update state immediately for UI responsiveness
     setCurrentTime(targetTime);
-    
+
     // If audio was playing, ensure it continues playing
     if (isPlaying && audio.paused) {
       audio.play().catch(err => console.log("Play after seek failed:", err));
     }
-    
+
     console.log("After seek - currentTime:", audio.currentTime.toFixed(2), "paused:", audio.paused);
   }
 
@@ -471,12 +538,12 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
   const proxyAudioUrl = useMemo(() => {
     const url = currentAudioUrl;
     if (!url) return null;
-    
+
     // If it's a local URL, use it directly
     if (url.startsWith("/")) {
       return url;
     }
-    
+
     // For external URLs (Tigris, S3, etc.), proxy through our API to handle CORS
     return `/api/audio/${encodeURIComponent(url)}`;
   }, [currentAudioUrl]);
@@ -522,7 +589,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                   className="flex items-center justify-center gap-2 mx-auto px-4 py-2 bg-[#1a1a1a] border border-[#333] rounded-lg hover:border-[#00ff88] hover:text-[#00ff88] transition-all"
                 >
                   <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+                    <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
                   </svg>
                   Sign in with GitHub
                 </button>
@@ -641,7 +708,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                   </svg>
                   Regenerate
                 </button>
-                
+
                 {episodes.length > 0 && (
                   <button
                     onClick={() => setStatus("completed")}
@@ -709,7 +776,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                 <div className="w-full max-w-md mx-auto">
                   {/* Progress bar track - uses maxProgress to never go backwards */}
                   <div className="w-full h-2 bg-[#1a1a1a] rounded-full overflow-hidden">
-                    <div 
+                    <div
                       className="h-full bg-gradient-to-r from-[#00ff88] to-[#00cc66] rounded-full transition-all duration-500 ease-out"
                       style={{ width: `${maxProgress}%` }}
                     />
@@ -723,7 +790,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                       {STEP_LABELS[progressStep] || "Processing"}: {progressDescription}
                     </span>
                   </div>
-                  
+
                   {/* Sub-step details */}
                   {progressSubStep && (
                     <p className="text-sm text-[#666] max-w-md text-pretty">
@@ -741,13 +808,12 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                     return (
                       <div
                         key={step}
-                        className={`w-3 h-3 rounded-full transition-all ${
-                          isCurrent 
-                            ? "bg-[#00ff88] scale-125 animate-pulse" 
-                            : isActive 
-                              ? "bg-[#00ff88]" 
-                              : "bg-[#333]"
-                        }`}
+                        className={`w-3 h-3 rounded-full transition-all ${isCurrent
+                          ? "bg-[#00ff88] scale-125 animate-pulse"
+                          : isActive
+                            ? "bg-[#00ff88]"
+                            : "bg-[#333]"
+                          }`}
                       />
                     );
                   })}
@@ -799,8 +865,8 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
   return (
     <main className="min-h-dvh bg-[#0a0a0a] text-[#e8e8e8] pb-28 lg:pb-8">
       {/* Audio element */}
-      <audio 
-        ref={audioRef} 
+      <audio
+        ref={audioRef}
         preload="auto"
         crossOrigin="anonymous"
         src={proxyAudioUrl || undefined}
@@ -815,19 +881,19 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
             <span className="font-editorial italic text-[#00ff88]">talks</span>
           </Link>
           <div className="flex items-center gap-2 sm:gap-4">
-            <a 
-              href={playlist?.repoUrl || `https://github.com/${owner}/${repo}`} 
+            <a
+              href={playlist?.repoUrl || `https://github.com/${owner}/${repo}`}
               target="_blank"
               rel="noopener noreferrer"
               className="hidden sm:flex items-center gap-2 text-sm text-[#666] hover:text-[#00ff88] transition-colors"
             >
               <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+                <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
               </svg>
               <span className="font-mono text-xs">{owner}/{repo}</span>
             </a>
-            <Link 
-              href="/" 
+            <Link
+              href="/"
               className="p-2 rounded-lg hover:bg-[#1a1a1a] transition-colors"
               aria-label="Go home"
             >
@@ -849,7 +915,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                 {repo[0]?.toUpperCase() || "?"}
               </span>
             </div>
-            
+
             {/* Repo Info */}
             <div className="flex-1 min-w-0">
               <h1 className="font-editorial text-2xl sm:text-4xl lg:text-5xl tracking-tight mb-2 sm:mb-3 text-balance">
@@ -898,7 +964,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
               <h2 className="font-editorial text-xl sm:text-2xl lg:text-3xl mb-3">
                 {currentEpisodeData?.title || "Loading..."}
               </h2>
-              
+
               {currentEpisodeData?.description && (
                 <p className="text-[#888] text-sm sm:text-base mb-6 line-clamp-2">
                   {currentEpisodeData.description}
@@ -907,7 +973,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
 
               {/* Progress Bar - Larger touch target */}
               <div className="mb-4">
-                <div 
+                <div
                   className="relative h-2 sm:h-3 bg-[#1a1a1a] rounded-full overflow-hidden cursor-pointer group"
                   onClick={seekTo}
                 >
@@ -927,17 +993,17 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
 
               {/* Controls - Desktop */}
               <div className="hidden sm:flex items-center justify-center gap-4">
-                <button 
+                <button
                   className="w-12 h-12 flex items-center justify-center text-[#888] hover:text-[#00ff88] hover:bg-[#1a1a1a] rounded-full transition-all disabled:opacity-30 disabled:cursor-not-allowed"
                   disabled={currentEpisode === 0}
                   onClick={() => setCurrentEpisode(Math.max(0, currentEpisode - 1))}
                   aria-label="Previous episode"
                 >
                   <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/>
+                    <path d="M6 6h2v12H6zm3.5 6l8.5 6V6z" />
                   </svg>
                 </button>
-                
+
                 <button
                   onClick={togglePlay}
                   disabled={!currentEpisodeData?.audioUrl}
@@ -946,23 +1012,23 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                 >
                   {isPlaying ? (
                     <svg className="w-7 h-7" fill="currentColor" viewBox="0 0 24 24">
-                      <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z"/>
+                      <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
                     </svg>
                   ) : (
                     <svg className="w-7 h-7 ml-1" fill="currentColor" viewBox="0 0 24 24">
-                      <path d="M8 5v14l11-7z"/>
+                      <path d="M8 5v14l11-7z" />
                     </svg>
                   )}
                 </button>
 
-                <button 
+                <button
                   className="w-12 h-12 flex items-center justify-center text-[#888] hover:text-[#00ff88] hover:bg-[#1a1a1a] rounded-full transition-all disabled:opacity-30 disabled:cursor-not-allowed"
                   disabled={currentEpisode >= episodes.length - 1}
                   onClick={() => setCurrentEpisode(Math.min(episodes.length - 1, currentEpisode + 1))}
                   aria-label="Next episode"
                 >
                   <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M16 18h2V6h-2v12zM6 18l8.5-6L6 6v12z"/>
+                    <path d="M16 18h2V6h-2v12zM6 18l8.5-6L6 6v12z" />
                   </svg>
                 </button>
               </div>
@@ -990,9 +1056,10 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                   </div>
                 </summary>
                 <div className="mt-2 p-5 sm:p-6 bg-[#111] border border-[#1a1a1a] rounded-2xl max-h-96 overflow-y-auto grainy">
-                  <p className="text-[#aaa] text-sm leading-relaxed whitespace-pre-wrap">
-                    {currentEpisodeData.transcript}
-                  </p>
+                  <TranscriptDisplay
+                    transcript={currentEpisodeData.transcript}
+                    conversationStyle={currentEpisodeData.conversationStyle}
+                  />
                 </div>
               </details>
             )}
@@ -1014,18 +1081,16 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                       setCurrentEpisode(idx);
                       setCurrentTime(0);
                     }}
-                    className={`w-full text-left p-4 rounded-xl transition-all group grainy ${
-                      idx === currentEpisode
-                        ? "bg-[#0d2818] border border-[#00ff88]/40 text-[#e8e8e8]"
-                        : "bg-[#111] border border-[#1a1a1a] hover:border-[#00ff88]/30 hover:bg-[#141414]"
-                    }`}
+                    className={`w-full text-left p-4 rounded-xl transition-all group grainy ${idx === currentEpisode
+                      ? "bg-[#0d2818] border border-[#00ff88]/40 text-[#e8e8e8]"
+                      : "bg-[#111] border border-[#1a1a1a] hover:border-[#00ff88]/30 hover:bg-[#141414]"
+                      }`}
                   >
                     <div className="flex items-center gap-3">
-                      <div className={`shrink-0 w-10 h-10 rounded-lg flex items-center justify-center text-sm font-bold ${
-                        idx === currentEpisode 
-                          ? "bg-[#00ff88]/20 text-[#00ff88]" 
-                          : "bg-[#1a1a1a] text-[#666]"
-                      }`}>
+                      <div className={`shrink-0 w-10 h-10 rounded-lg flex items-center justify-center text-sm font-bold ${idx === currentEpisode
+                        ? "bg-[#00ff88]/20 text-[#00ff88]"
+                        : "bg-[#1a1a1a] text-[#666]"
+                        }`}>
                         {idx === currentEpisode && isPlaying ? (
                           <div className="flex gap-0.5 items-end h-4">
                             <div className="w-1 bg-current rounded-full animate-pulse" style={{ height: "60%" }} />
@@ -1037,14 +1102,12 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                         )}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <div className={`text-sm font-medium truncate ${
-                          idx === currentEpisode ? "text-[#00ff88]" : "group-hover:text-[#00ff88]"
-                        }`}>
+                        <div className={`text-sm font-medium truncate ${idx === currentEpisode ? "text-[#00ff88]" : "group-hover:text-[#00ff88]"
+                          }`}>
                           {episode.title}
                         </div>
-                        <div className={`text-xs font-mono ${
-                          idx === currentEpisode ? "text-[#00ff88]/60" : "text-[#666]"
-                        }`}>
+                        <div className={`text-xs font-mono ${idx === currentEpisode ? "text-[#00ff88]/60" : "text-[#666]"
+                          }`}>
                           {formatTime(episode.durationSecs)}
                         </div>
                       </div>
@@ -1069,27 +1132,24 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
                     setCurrentTime(0);
                     window.scrollTo({ top: 0, behavior: "smooth" });
                   }}
-                  className={`w-full text-left p-4 rounded-xl transition-all grainy ${
-                    idx === currentEpisode
-                      ? "bg-[#0d2818] border border-[#00ff88]/40 text-[#e8e8e8]"
-                      : "bg-[#111] border border-[#1a1a1a] active:bg-[#1a1a1a]"
-                  }`}
+                  className={`w-full text-left p-4 rounded-xl transition-all grainy ${idx === currentEpisode
+                    ? "bg-[#0d2818] border border-[#00ff88]/40 text-[#e8e8e8]"
+                    : "bg-[#111] border border-[#1a1a1a] active:bg-[#1a1a1a]"
+                    }`}
                 >
                   <div className="flex items-center gap-3">
-                    <div className={`shrink-0 w-10 h-10 rounded-lg flex items-center justify-center text-sm font-bold ${
-                      idx === currentEpisode 
-                        ? "bg-[#00ff88]/20 text-[#00ff88]" 
-                        : "bg-[#1a1a1a] text-[#666]"
-                    }`}>
+                    <div className={`shrink-0 w-10 h-10 rounded-lg flex items-center justify-center text-sm font-bold ${idx === currentEpisode
+                      ? "bg-[#00ff88]/20 text-[#00ff88]"
+                      : "bg-[#1a1a1a] text-[#666]"
+                      }`}>
                       {String(episode.episodeNumber).padStart(2, "0")}
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="text-sm font-medium truncate">
                         {episode.title}
                       </div>
-                      <div className={`text-xs font-mono ${
-                        idx === currentEpisode ? "text-[#00ff88]/60" : "text-[#666]"
-                      }`}>
+                      <div className={`text-xs font-mono ${idx === currentEpisode ? "text-[#00ff88]/60" : "text-[#666]"
+                        }`}>
                         {formatTime(episode.durationSecs)}
                       </div>
                     </div>
@@ -1108,7 +1168,7 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
       <div className="fixed bottom-0 left-0 right-0 lg:hidden bg-[#111] border-t border-[#1a1a1a] p-3 safe-area-inset-bottom z-50">
         <div className="flex items-center gap-3">
           {/* Mini Progress */}
-          <div 
+          <div
             className="flex-1 h-1 bg-[#1a1a1a] rounded-full overflow-hidden"
             onClick={seekTo}
           >
@@ -1117,19 +1177,19 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
               style={{ width: duration ? `${(currentTime / duration) * 100}%` : "0%" }}
             />
           </div>
-          
+
           {/* Controls */}
           <div className="flex items-center gap-2">
-            <button 
+            <button
               className="w-10 h-10 flex items-center justify-center text-[#888] disabled:opacity-30"
               disabled={currentEpisode === 0}
               onClick={() => setCurrentEpisode(Math.max(0, currentEpisode - 1))}
             >
               <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/>
+                <path d="M6 6h2v12H6zm3.5 6l8.5 6V6z" />
               </svg>
             </button>
-            
+
             <button
               onClick={togglePlay}
               disabled={!currentEpisodeData?.audioUrl}
@@ -1137,22 +1197,22 @@ export default function PlayerPage({ params }: { params: Promise<{ owner: string
             >
               {isPlaying ? (
                 <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z"/>
+                  <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
                 </svg>
               ) : (
                 <svg className="w-5 h-5 ml-0.5" fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M8 5v14l11-7z"/>
+                  <path d="M8 5v14l11-7z" />
                 </svg>
               )}
             </button>
 
-            <button 
+            <button
               className="w-10 h-10 flex items-center justify-center text-[#888] disabled:opacity-30"
               disabled={currentEpisode >= episodes.length - 1}
               onClick={() => setCurrentEpisode(Math.min(episodes.length - 1, currentEpisode + 1))}
             >
               <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M16 18h2V6h-2v12zM6 18l8.5-6L6 6v12z"/>
+                <path d="M16 18h2V6h-2v12zM6 18l8.5-6L6 6v12z" />
               </svg>
             </button>
           </div>
