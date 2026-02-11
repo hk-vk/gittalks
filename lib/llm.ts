@@ -124,7 +124,7 @@ function getDepthSettings(fileCount: number): DepthSettings {
     return {
       scope: "sampled",
       maxFilesToAnalyze: 100,
-      episodeDepth: "focused",
+      episodeDepth: "moderate",
       suggestedEpisodes: { min: 6, max: 12 },
       fileContentLimit: 5000,
       depthGuidance: "Focus on key architectural systems and design patterns. Generate 10-15 minute episodes covering major subsystems.",
@@ -150,7 +150,7 @@ function buildAnalysisPrompt(
   depthSettings: DepthSettings
 ): string {
   const fileCount = repoData.files.length;
-  
+
   // Dynamic file overview - show more structure for larger repos
   const maxFilesToShow = fileCount < 100 ? 100 : fileCount < 500 ? 150 : 200;
   const filesOverview = repoData.files
@@ -246,7 +246,7 @@ export async function analyzeRepository(
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      
+
       // Check if rate limited
       if (errorMessage.includes("429") || errorMessage.toLowerCase().includes("rate") || errorMessage.toLowerCase().includes("quota")) {
         const delay = getLLMRetryDelay(attempt);
@@ -254,12 +254,12 @@ export async function analyzeRepository(
         await sleep(delay);
         continue;
       }
-      
+
       // For other errors, throw immediately
       throw error;
     }
   }
-  
+
   throw new Error(`Failed to analyze repository after ${LLM_RATE_LIMIT.maxRetries} attempts`);
 }
 
@@ -408,7 +408,7 @@ export async function generateSingleEpisodeContent(
     .map((path) => repoData.fileContents.find((f) => f.path === path))
     .filter(Boolean)
     .slice(0, 8);
-    
+
   // Also include additional context files from the repo
   const additionalFiles = repoData.fileContents
     .filter((f) => !relevantFiles.find((rf) => rf?.path === f.path))
@@ -466,18 +466,18 @@ IMPORTANT: The episode MUST be 3000-4000 words to achieve proper 10-15 minute du
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      
+
       if (errorMessage.includes("429") || errorMessage.toLowerCase().includes("rate") || errorMessage.toLowerCase().includes("quota")) {
         const delay = getLLMRetryDelay(attempt);
         console.log(`[LLM] Rate limited on episode ${episodeNumber}, waiting ${Math.round(delay / 1000)}s (attempt ${attempt + 1}/${LLM_RATE_LIMIT.maxRetries})...`);
         await sleep(delay);
         continue;
       }
-      
+
       throw error;
     }
   }
-  
+
   throw new Error(`Failed to generate episode ${episodeNumber} after ${LLM_RATE_LIMIT.maxRetries} attempts`);
 }
 
@@ -497,7 +497,7 @@ export async function generateDuoEpisodeContent(
     .map((path) => repoData.fileContents.find((f) => f.path === path))
     .filter(Boolean)
     .slice(0, 8);
-    
+
   // Also include additional context files from the repo
   const additionalFiles = repoData.fileContents
     .filter((f) => !relevantFiles.find((rf) => rf?.path === f.path))
@@ -563,18 +563,18 @@ IMPORTANT: Generate AT LEAST 35 dialogue turns to achieve proper 10-15 minute du
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      
+
       if (errorMessage.includes("429") || errorMessage.toLowerCase().includes("rate") || errorMessage.toLowerCase().includes("quota")) {
         const delay = getLLMRetryDelay(attempt);
         console.log(`[LLM] Rate limited on duo episode ${episodeNumber}, waiting ${Math.round(delay / 1000)}s (attempt ${attempt + 1}/${LLM_RATE_LIMIT.maxRetries})...`);
         await sleep(delay);
         continue;
       }
-      
+
       throw error;
     }
   }
-  
+
   throw new Error(`Failed to generate duo episode ${episodeNumber} after ${LLM_RATE_LIMIT.maxRetries} attempts`);
 }
 
@@ -587,11 +587,11 @@ export async function generateAllEpisodesContent(
   conversationStyle: ConversationStyle
 ): Promise<GeneratedContent> {
   const totalEpisodes = analysis.episodes.length;
-  
+
   // PARALLEL episode generation - process in batches
   // Using batch size of 3 to avoid overwhelming the LLM API
   const PARALLEL_BATCH_SIZE = 3;
-  
+
   type EpisodeResult = { index: number; content: EpisodeContent };
   const episodeResults: EpisodeResult[] = [];
 
@@ -600,48 +600,48 @@ export async function generateAllEpisodesContent(
   for (let batchStart = 0; batchStart < totalEpisodes; batchStart += PARALLEL_BATCH_SIZE) {
     const batchEnd = Math.min(batchStart + PARALLEL_BATCH_SIZE, totalEpisodes);
     const batch = analysis.episodes.slice(batchStart, batchEnd);
-    
+
     console.log(`[LLM] Parallel batch ${Math.floor(batchStart / PARALLEL_BATCH_SIZE) + 1}: episodes ${batchStart + 1}-${batchEnd} of ${totalEpisodes}`);
-    
+
     // Generate batch in parallel
     const batchPromises = batch.map(async (episode, batchIndex) => {
       const globalIndex = batchStart + batchIndex;
       const episodeNumber = globalIndex + 1;
-      
+
       console.log(`[LLM] Starting episode ${episodeNumber}/${totalEpisodes}: ${episode.title}`);
-      
+
       const content =
         conversationStyle === "duo"
           ? await generateDuoEpisodeContent(
-              owner,
-              name,
-              repoData,
-              episode,
-              episodeNumber,
-              totalEpisodes,
-              analysis
-            )
+            owner,
+            name,
+            repoData,
+            episode,
+            episodeNumber,
+            totalEpisodes,
+            analysis
+          )
           : await generateSingleEpisodeContent(
-              owner,
-              name,
-              repoData,
-              episode,
-              episodeNumber,
-              totalEpisodes,
-              analysis
-            );
-      
+            owner,
+            name,
+            repoData,
+            episode,
+            episodeNumber,
+            totalEpisodes,
+            analysis
+          );
+
       // Log word count for monitoring
       const wordCount = content.audioScript.split(/\s+/).length;
       console.log(`[LLM] Episode ${episodeNumber} generated: ${wordCount} words`);
-      
+
       return { index: globalIndex, content };
     });
-    
+
     // Wait for all in batch to complete
     const batchResults = await Promise.all(batchPromises);
     episodeResults.push(...batchResults);
-    
+
     // Delay between batches to prevent rate limiting
     if (batchEnd < totalEpisodes) {
       console.log(`[LLM] Waiting ${LLM_RATE_LIMIT.betweenEpisodesDelayMs / 1000}s before next batch...`);
@@ -651,7 +651,7 @@ export async function generateAllEpisodesContent(
 
   // Sort by index to ensure correct order
   episodeResults.sort((a, b) => a.index - b.index);
-  
+
   // Verify all episodes were generated
   if (episodeResults.length !== totalEpisodes) {
     throw new Error(`Missing episodes: expected ${totalEpisodes}, got ${episodeResults.length}`);
@@ -659,7 +659,7 @@ export async function generateAllEpisodesContent(
 
   // Extract contents in order
   const episodes = episodeResults.map(({ content }) => content);
-  
+
   console.log(`[LLM] All ${totalEpisodes} episodes generated successfully`);
 
 
