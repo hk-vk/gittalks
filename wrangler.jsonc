@@ -1,0 +1,37 @@
+{
+    "name": "gittalks",
+    "main": ".open-next/worker.js",
+    "compatibility_date": "2024-09-23",
+    "compatibility_flags": [
+        "nodejs_compat"
+    ],
+    // Enable workers.dev subdomain
+    "workers_dev": true,
+    // Static assets configuration
+    "assets": {
+        "directory": ".open-next/assets",
+        "binding": "ASSETS"
+    },
+    // KV Namespace for incremental cache (optional, create KV namespace in Cloudflare dashboard)
+    // Uncomment and add your KV namespace ID after creating it
+    // "kv_namespaces": [
+    //   {
+    //     "binding": "NEXT_INC_CACHE_KV",
+    //     "id": "your-kv-namespace-id",
+    //     "preview_id": "your-preview-kv-namespace-id"
+    //   }
+    // ],
+    // Environment variables (non-sensitive only)
+    "vars": {
+        "AWS_ENDPOINT_URL_S3": "https://t3.storage.dev",
+        "AWS_REGION": "auto",
+        "BUCKET_NAME": "gittalks",
+        "BETTER_AUTH_URL": "https://gittalks.hari.works",
+        "NEXT_PUBLIC_APP_URL": "https://gittalks.hari.works"
+    }
+    // Note: For production deployment, you may need to configure:
+    // - KV namespaces for caching
+    // - R2 buckets for larger cache storage
+    // - D1 databases for tag cache
+    // See: https://opennext.js.org/cloudflare for more details
+}
