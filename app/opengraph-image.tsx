@@ -12,7 +12,16 @@ const popularTalks = [
   { repo: "vercel/next.js", description: "The React Framework for the Web", stars: "131k" },
 ];
 
-export default function OpenGraphImage() {
+export default async function OpenGraphImage() {
+  const [instrumentSerifRegular, instrumentSerifItalic] = await Promise.all([
+    fetch(new URL("./fonts/InstrumentSerif-Regular.ttf", import.meta.url)).then((response) =>
+      response.arrayBuffer(),
+    ),
+    fetch(new URL("./fonts/InstrumentSerif-Italic.ttf", import.meta.url)).then((response) =>
+      response.arrayBuffer(),
+    ),
+  ]);
+
   return new ImageResponse(
     (
       <div
@@ -67,8 +76,8 @@ export default function OpenGraphImage() {
             }}
           >
             <div style={{ display: "flex", alignItems: "center", fontSize: 30, letterSpacing: -1 }}>
-              <span style={{ fontFamily: "Georgia, serif" }}>Git</span>
-              <span style={{ fontFamily: "Georgia, serif", fontStyle: "italic", color: "#00ff88" }}>
+              <span style={{ fontFamily: "Instrument Serif" }}>Git</span>
+              <span style={{ fontFamily: "Instrument Serif Italic", color: "#00ff88" }}>
                 talks
               </span>
             </div>
@@ -114,14 +123,14 @@ export default function OpenGraphImage() {
                 style={{
                   display: "flex",
                   flexDirection: "column",
-                  fontFamily: "Georgia, serif",
+                  fontFamily: "Instrument Serif",
                   fontSize: 92,
                   lineHeight: 0.95,
                   letterSpacing: -3.6,
                 }}
               >
                 <span>Listen to</span>
-                <span style={{ color: "#00ff88", fontStyle: "italic" }}>repositories</span>
+                <span style={{ color: "#00ff88", fontFamily: "Instrument Serif Italic" }}>repositories</span>
               </div>
 
               <div
@@ -226,7 +235,7 @@ export default function OpenGraphImage() {
 
             <div style={{ display: "flex", flexDirection: "column", marginTop: 58 }}>
               <div style={{ display: "flex", alignItems: "baseline", gap: 14 }}>
-                <div style={{ fontFamily: "Georgia, serif", fontSize: 42, letterSpacing: -1.6 }}>Popular Talks</div>
+                <div style={{ fontFamily: "Instrument Serif", fontSize: 42, letterSpacing: -1.6 }}>Popular Talks</div>
                 <div style={{ color: "#555555", fontSize: 18 }}>Discover trending repositories</div>
               </div>
 
@@ -294,5 +303,21 @@ export default function OpenGraphImage() {
       </div>
     ),
     size,
+    {
+      fonts: [
+        {
+          name: "Instrument Serif",
+          data: instrumentSerifRegular,
+          style: "normal",
+          weight: 400,
+        },
+        {
+          name: "Instrument Serif Italic",
+          data: instrumentSerifItalic,
+          style: "normal",
+          weight: 400,
+        },
+      ],
+    },
   );
 }
