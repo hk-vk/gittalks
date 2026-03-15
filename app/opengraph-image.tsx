@@ -76,7 +76,7 @@ export default async function OpenGraphImage() {
           >
             <div style={{ display: "flex", alignItems: "center", fontSize: 30, letterSpacing: -1 }}>
               <span style={{ fontFamily: "Instrument Serif" }}>Git</span>
-              <span style={{ fontFamily: "Instrument Serif Italic", color: "#00ff88" }}>
+              <span style={{ fontFamily: "Instrument Serif", fontStyle: "italic", color: "#00ff88" }}>
                 talks
               </span>
             </div>
@@ -129,7 +129,9 @@ export default async function OpenGraphImage() {
                 }}
               >
                 <span>Listen to</span>
-                <span style={{ color: "#00ff88", fontFamily: "Instrument Serif Italic" }}>repositories</span>
+                <span style={{ color: "#00ff88", fontFamily: "Instrument Serif", fontStyle: "italic" }}>
+                  repositories
+                </span>
               </div>
 
               <div
@@ -311,9 +313,9 @@ export default async function OpenGraphImage() {
           weight: 400,
         },
         {
-          name: "Instrument Serif Italic",
+          name: "Instrument Serif",
           data: instrumentSerifItalic,
-          style: "normal",
+          style: "italic",
           weight: 400,
         },
       ],
