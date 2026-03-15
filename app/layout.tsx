@@ -22,9 +22,33 @@ const jetbrainsMono = JetBrains_Mono({
   weight: ["400", "500"],
 });
 
+const appUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+
 export const metadata: Metadata = {
+  metadataBase: new URL(appUrl),
   title: "GitTalks - Listen to Repositories",
   description: "Transform GitHub repositories into AI-generated podcast episodes. Understand code through audio.",
+  openGraph: {
+    title: "GitTalks - Listen to Repositories",
+    description: "Transform GitHub repositories into AI-generated podcast episodes. Understand code through audio.",
+    url: appUrl,
+    siteName: "GitTalks",
+    type: "website",
+    images: [
+      {
+        url: "/opengraph-image",
+        width: 1200,
+        height: 630,
+        alt: "GitTalks editorial hero artwork",
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "GitTalks - Listen to Repositories",
+    description: "Transform GitHub repositories into AI-generated podcast episodes. Understand code through audio.",
+    images: ["/opengraph-image"],
+  },
 };
 
 export default function RootLayout({
