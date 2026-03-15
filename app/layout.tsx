@@ -36,7 +36,7 @@ export const metadata: Metadata = {
     type: "website",
     images: [
       {
-        url: "/opengraph-image",
+        url: "/og-home.png",
         width: 1200,
         height: 630,
         alt: "GitTalks editorial hero artwork",
@@ -47,7 +47,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "GitTalks - Listen to Repositories",
     description: "Transform GitHub repositories into AI-generated podcast episodes. Understand code through audio.",
-    images: ["/opengraph-image"],
+    images: ["/og-home.png"],
   },
 };
 
