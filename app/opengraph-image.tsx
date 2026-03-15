@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { ImageResponse } from "next/og";
 
 export const alt = "GitTalks editorial hero artwork";
@@ -6,6 +8,7 @@ export const size = {
   height: 630,
 };
 export const contentType = "image/png";
+export const runtime = "nodejs";
 
 const popularTalks = [
   { repo: "github/copilot-cli", description: "GitHub Copilot in the terminal", stars: "21.4k" },
@@ -14,12 +17,8 @@ const popularTalks = [
 
 export default async function OpenGraphImage() {
   const [instrumentSerifRegular, instrumentSerifItalic] = await Promise.all([
-    fetch(new URL("./fonts/InstrumentSerif-Regular.ttf", import.meta.url)).then((response) =>
-      response.arrayBuffer(),
-    ),
-    fetch(new URL("./fonts/InstrumentSerif-Italic.ttf", import.meta.url)).then((response) =>
-      response.arrayBuffer(),
-    ),
+    readFile(path.join(process.cwd(), "app/fonts/InstrumentSerif-Regular.ttf")),
+    readFile(path.join(process.cwd(), "app/fonts/InstrumentSerif-Italic.ttf")),
   ]);
 
   return new ImageResponse(
